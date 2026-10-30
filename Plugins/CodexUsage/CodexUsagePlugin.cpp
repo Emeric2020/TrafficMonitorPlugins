@@ -1021,6 +1021,44 @@ namespace
         return { shared_width, shared_width };
     }
 
+    void DrawMinuteHistogram(HDC dc, const RECT& area, const std::vector<double>& buckets, int minutes_per_column, COLORREF color)
+    {
+        const int width = area.right - area.left;
+        const int height = area.bottom - area.top;
+        if (width <= 0 || height <= 2 || buckets.empty() || minutes_per_column <= 0) return;
+
+        const int columns = (std::min)(width,
+            static_cast<int>((buckets.size() + minutes_per_column - 1) / minutes_per_column));
+        if (columns <= 0) return;
+
+        const size_t covered = (std::min)(buckets.size(), static_cast<size_t>(columns) * minutes_per_column);
+        const size_t start_offset = buckets.size() - covered;
+        std::vector<double> values(static_cast<size_t>(columns), 0.0);
+        double maximum = 0.0;
+        for (int column = 0; column < columns; ++column)
+        {
+            const size_t first = start_offset + static_cast<size_t>(column) * minutes_per_column;
+            const size_t last = (std::min)(first + minutes_per_column, buckets.size());
+            for (size_t i = first; i < last; ++i)
+                values[column] += buckets[i];
+            maximum = (std::max)(maximum, values[column]);
+        }
+        if (maximum <= 0.0) return;
+
+        HBRUSH brush = CreateSolidBrush(color);
+        if (!brush) return;
+        const int plot_height = height - 2;
+        const int chart_left = area.right - columns;
+        for (int column = 0; column < columns; ++column)
+        {
+            if (values[column] <= 0.0) continue;
+            const int bar_height = (std::max)(1, static_cast<int>(std::lround(plot_height * values[column] / maximum)));
+            RECT bar{ chart_left + column, area.bottom - bar_height, chart_left + column + 1, area.bottom };
+            FillRect(dc, &bar, brush);
+        }
+        DeleteObject(brush);
+    }
+
     void DrawRow(HDC dc, const CodexSnapshot& snapshot, bool weekly, int x, int y, int w, int h, bool dark)
     {
         const auto options = CCodexUsagePlugin::Instance().Options();
@@ -1152,10 +1190,15 @@ namespace
         const int value_x = bar_x + drawn_width + sc(8);
         const std::wstring summary = QuotaSummary(snapshot, weekly);
         SIZE size{}; GetTextExtentPoint32W(dc, summary.c_str(), static_cast<int>(summary.size()), &size);
-        RECT summary_rect{ value_x, y, value_x + size.cx + sc(1), y + row_height };
-        DrawText(dc, summary_rect, summary, foreground);
         const std::wstring other_summary = options.show_session && options.show_weekly ? QuotaSummary(snapshot, !weekly) : summary;
         SIZE other_size{}; GetTextExtentPoint32W(dc, other_summary.c_str(), static_cast<int>(other_summary.size()), &other_size);
+        RECT summary_rect{ value_x, y, value_x + size.cx + sc(1), y + row_height };
+        RECT histogram_rect{ summary_rect.left, summary_rect.top + sc(1),
+            value_x + (std::max)(size.cx, other_size.cx) + sc(1), summary_rect.bottom - sc(1) };
+        DrawMinuteHistogram(dc, histogram_rect,
+            weekly ? snapshot.weekly_minute_buckets : snapshot.session_minute_buckets,
+            weekly ? 15 : 1, RGB(194, 202, 211));
+        DrawText(dc, summary_rect, summary, foreground);
         const int badge_x = value_x + (std::max)(size.cx, other_size.cx) + sc(6);
         const int count = options.show_cards ? (std::min)(8, (std::max)(0, snapshot.reset_credits)) : 0;
         const bool double_row = options.show_session && options.show_weekly;
@@ -1490,6 +1533,8 @@ void CCodexUsagePlugin::RefreshSnapshot()
     m_weekly_history.Prune(sampled_at);
     next.session_recent = m_session_history.Recent(sampled_at, 3600);
     next.weekly_recent = m_weekly_history.Recent(sampled_at, 86400);
+    next.session_minute_buckets = m_session_history.RecentBuckets(sampled_at, 5 * 3600);
+    next.weekly_minute_buckets = m_weekly_history.RecentBuckets(sampled_at, 7 * 86400);
     m_remote_cache = next;
     ScanSessions(next);
     std::wostringstream details;

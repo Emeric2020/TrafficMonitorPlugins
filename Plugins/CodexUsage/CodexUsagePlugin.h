@@ -40,6 +40,8 @@ struct CodexSnapshot
     double weekly_used{};
     double session_recent{};
     double weekly_recent{};
+    std::vector<double> session_minute_buckets;
+    std::vector<double> weekly_minute_buckets;
     long long session_reset{};
     long long weekly_reset{};
     int reset_credits{-1};

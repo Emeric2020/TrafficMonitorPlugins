@@ -104,6 +104,16 @@ The 5h display sums the last rolling 60 minutes and the 7d display sums the last
 rolling 24 hours. Failed requests never fabricate meter readings. Timestamp shifts
 alone never reset statistics.
 
+The taskbar quota summary text is drawn over a compact per-minute histogram. Its
+width follows the measured summary text width. The 5h row uses one physical pixel
+per minute, showing as many recent minutes as fit (up to the current 5h cycle).
+The 7d row uses one pixel per 15 minutes, summing consumption within each slice
+and showing as many recent slices as fit (up to seven days). Both use the fixed
+RGB color (194, 202, 211). The chart is right-aligned: the rightmost column is the
+most recent minute or 15-minute slice, so new activity advances the bars to the
+left over time. When both rows are visible, their charts share the right edge of
+the longer summary label; the labels themselves remain left-aligned.
+
 If an interval crosses the previous expiry, or the used percentage drops by more
 than half a percentage point, the window starts a new cycle. The current reading
 is allocated only after that cycle's start. The reported reset minus the window

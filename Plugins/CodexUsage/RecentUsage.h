@@ -4,6 +4,7 @@
 #include <deque>
 #include <istream>
 #include <ostream>
+#include <vector>
 
 namespace CodexRecent
 {
@@ -69,6 +70,32 @@ public:
             else if (start >= cutoff && start <= now) total += minute.amount;
         }
         return (std::clamp)(total, 0.0, 100.0);
+    }
+
+    std::vector<double> RecentBuckets(long long now, long long duration) const
+    {
+        if (last_time == 0 || now < last_time || reset <= now || duration <= 0) return {};
+        const long long display_start = now - duration;
+        const long long cutoff = (std::max)(display_start, cycle_start);
+        const size_t count = static_cast<size_t>((duration + 59) / 60);
+        std::vector<double> buckets(count, 0.0);
+        for (const auto& minute : minutes)
+        {
+            if (minute.cycle != cycle_start) continue;
+            const long long start = (std::max)({ minute.time, cycle_start, cutoff });
+            const long long end = (std::min)({ minute.time + 60, last_time, now });
+            if (end <= start) continue;
+            const double rate = minute.amount / static_cast<double>((std::min)(minute.time + 60, last_time) - (std::max)(minute.time, cycle_start));
+            const size_t first = static_cast<size_t>((start - display_start) / 60);
+            const size_t last = (std::min)(count - 1, static_cast<size_t>((end - 1 - display_start) / 60));
+            for (size_t i = first; i <= last; ++i)
+            {
+                const long long bucket_start = display_start + static_cast<long long>(i) * 60;
+                const long long overlap = (std::min)(end, bucket_start + 60) - (std::max)(start, bucket_start);
+                if (overlap > 0) buckets[i] += rate * overlap;
+            }
+        }
+        return buckets;
     }
 
     // Retention is independent from recording, window queries, and cycle changes.
