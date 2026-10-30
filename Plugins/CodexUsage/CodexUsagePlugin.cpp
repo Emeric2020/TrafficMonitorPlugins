@@ -1154,12 +1154,20 @@ namespace
         const int badge_x = value_x + (std::max)(size.cx, other_size.cx) + sc(6);
         const int count = options.show_cards ? (std::min)(8, (std::max)(0, snapshot.reset_credits)) : 0;
         const bool double_row = options.show_session && options.show_weekly;
+        HFONT measure_font = CreateFontW(-sc(8), 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+        HGDIOBJ old_measure_font = SelectObject(dc, measure_font);
+        SIZE widest_badge_text{};
+        GetTextExtentPoint32W(dc, L"88h", 3, &widest_badge_text);
+        SelectObject(dc, old_measure_font);
+        DeleteObject(measure_font);
+        const int card_width = (std::max)(sc(14), static_cast<int>(widest_badge_text.cx) + sc(2));
         for (int i = double_row && weekly ? 1 : 0; i < count; i += double_row ? 2 : 1)
         {
             const int card_size = (std::max)(10, (std::min)(sc(14), row_height - sc(3)));
-            const int bx = badge_x + (double_row ? i / 2 : i) * (card_size + sc(2));
-            if (bx + card_size > x + w) break;
-            RECT badge{ bx, y + (row_height - card_size) / 2, bx + card_size, y + (row_height - card_size) / 2 + card_size };
+            const int bx = badge_x + (double_row ? i / 2 : i) * (card_width + sc(2));
+            if (bx + card_width > x + w) break;
+            RECT badge{ bx, y + (row_height - card_size) / 2, bx + card_width, y + (row_height - card_size) / 2 + card_size };
             const long long expiry = static_cast<size_t>(i) < snapshot.reset_credit_expiries.size() ? snapshot.reset_credit_expiries[i] : 0;
             const long long seconds = expiry - static_cast<long long>(time(nullptr));
             COLORREF color = foreground;
@@ -1169,8 +1177,17 @@ namespace
                 else if (seconds < 86400) color = RGB(196, 95, 0);
                 else if (seconds < 7LL * 86400) color = dark ? RGB(105, 151, 196) : RGB(88, 151, 209);
             }
-            HBRUSH border = CreateSolidBrush(color);
-            FrameRect(dc, &badge, border);
+            const int right = badge.right - 1;
+            const int bottom = badge.bottom - 1;
+            const int bevel = (std::max)(1, (std::min)(sc(3), card_size / 3));
+            const POINT outline[] = {
+                { badge.left, badge.top }, { right - bevel, badge.top }, { right, badge.top + bevel },
+                { right, bottom }, { badge.left, bottom }, { badge.left, badge.top }
+            };
+            HPEN border = CreatePen(PS_SOLID, (std::max)(1, sc(1)), color);
+            HGDIOBJ old_pen = SelectObject(dc, border);
+            Polyline(dc, outline, 6);
+            SelectObject(dc, old_pen);
             DeleteObject(border);
             const std::wstring text = ResetBadge(expiry);
             HFONT font = CreateFontW(-sc(text.size() > 2 ? 8 : 9), 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE,
@@ -1179,36 +1196,8 @@ namespace
             const int saved_dc = SaveDC(dc);
             SetTextColor(dc, color);
             SetBkMode(dc, TRANSPARENT);
-            // Center the visible glyphs, excluding the font's leading and side bearings.
-            MAT2 identity{ { 0, 1 }, { 0, 0 }, { 0, 0 }, { 0, 1 } };
-            RECT ink{};
-            int advance = 0;
-            bool measured = true;
-            bool first_glyph = true;
-            for (wchar_t character : text)
-            {
-                GLYPHMETRICS glyph{};
-                if (GetGlyphOutlineW(dc, character, GGO_METRICS, &glyph, 0, nullptr, &identity) == GDI_ERROR)
-                {
-                    measured = false;
-                    break;
-                }
-                RECT bounds{ advance + glyph.gmptGlyphOrigin.x, -glyph.gmptGlyphOrigin.y,
-                    advance + glyph.gmptGlyphOrigin.x + static_cast<int>(glyph.gmBlackBoxX),
-                    -glyph.gmptGlyphOrigin.y + static_cast<int>(glyph.gmBlackBoxY) };
-                if (first_glyph) { ink = bounds; first_glyph = false; }
-                else { UnionRect(&ink, &ink, &bounds); }
-                advance += glyph.gmCellIncX;
-            }
-            if (measured && !first_glyph)
-            {
-                SetTextAlign(dc, TA_LEFT | TA_BASELINE | TA_NOUPDATECP);
-                TextOutW(dc, (badge.left + badge.right - ink.left - ink.right) / 2,
-                    (badge.top + badge.bottom - ink.top - ink.bottom) / 2,
-                    text.c_str(), static_cast<int>(text.size()));
-            }
-            else
-                ::DrawTextW(dc, text.c_str(), static_cast<int>(text.size()), &badge, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            ::DrawTextW(dc, text.c_str(), static_cast<int>(text.size()), &badge,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             RestoreDC(dc, saved_dc);
             SelectObject(dc, old); DeleteObject(font);
         }
