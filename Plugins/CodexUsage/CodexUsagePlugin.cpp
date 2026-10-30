@@ -32,6 +32,12 @@
 
 namespace
 {
+    int ScaleForDpi(HDC dc, int value)
+    {
+        const int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSX) : USER_DEFAULT_SCREEN_DPI;
+        return MulDiv(value, dpi > 0 ? dpi : USER_DEFAULT_SCREEN_DPI, USER_DEFAULT_SCREEN_DPI);
+    }
+
     constexpr wchar_t kUsageHost[] = L"chatgpt.com";
     constexpr wchar_t kUsagePath[] = L"/backend-api/wham/usage";
     constexpr wchar_t kCreditsPath[] = L"/backend-api/wham/rate-limit-reset-credits";
@@ -552,7 +558,7 @@ namespace
     {
         if (expiry <= 0) return L"?";
         const long long seconds = (std::max)(0LL, expiry - static_cast<long long>(time(nullptr)));
-        if (seconds < 3600) return std::to_wstring(seconds / 60) + L"m";
+        if (seconds < 3600) return std::to_wstring(seconds / 60) + L"'";
         if (seconds < 86400) return std::to_wstring(seconds / 3600) + L"h";
         return std::to_wstring(seconds / 86400);
     }
@@ -1022,8 +1028,7 @@ namespace
         const bool available = weekly ? snapshot.has_weekly : snapshot.has_session;
         const double used = weekly ? snapshot.weekly_used : snapshot.session_used;
         const long long reset = weekly ? snapshot.weekly_reset : snapshot.session_reset;
-        TEXTMETRICW metrics{}; GetTextMetricsW(dc, &metrics);
-        const auto sc = [&](int n) { return MulDiv(n, (std::max)(16L, metrics.tmHeight), 16); };
+        const auto sc = [&](int n) { return ScaleForDpi(dc, n); };
         const int left = x + sc(2);
         const int row_height = h;
         const COLORREF foreground = dark ? RGB(235, 238, 242) : RGB(45, 49, 54);
@@ -1171,11 +1176,24 @@ namespace
             const long long expiry = static_cast<size_t>(i) < snapshot.reset_credit_expiries.size() ? snapshot.reset_credit_expiries[i] : 0;
             const long long seconds = expiry - static_cast<long long>(time(nullptr));
             COLORREF color = foreground;
+            COLORREF fill_color = RGB(194, 202, 211);
             if (expiry > 0)
             {
-                if (seconds < 3600) color = RGB(198, 40, 40);
-                else if (seconds < 86400) color = RGB(196, 95, 0);
-                else if (seconds < 7LL * 86400) color = dark ? RGB(105, 151, 196) : RGB(88, 151, 209);
+                if (seconds < 3600)
+                {
+                    color = RGB(198, 40, 40);
+                    fill_color = RGB(250, 225, 224);
+                }
+                else if (seconds < 86400)
+                {
+                    color = RGB(155, 108, 0);
+                    fill_color = RGB(255, 243, 191);
+                }
+                else if (seconds < 7LL * 86400)
+                {
+                    color = dark ? RGB(74, 128, 184) : RGB(35, 87, 143);
+                    fill_color = dark ? RGB(177, 202, 230) : RGB(190, 213, 237);
+                }
             }
             const int right = badge.right - 1;
             const int bottom = badge.bottom - 1;
@@ -1184,7 +1202,26 @@ namespace
                 { badge.left, badge.top }, { right - bevel, badge.top }, { right, badge.top + bevel },
                 { right, bottom }, { badge.left, bottom }, { badge.left, badge.top }
             };
-            HPEN border = CreatePen(PS_SOLID, (std::max)(1, sc(1)), color);
+            constexpr int left_top_inset = 2; // one pixel for the outline and one for the visible gap
+            const int inner_right = right - 1;
+            const int inner_bottom = bottom - 1;
+            const int inner_bevel = (std::max)(1, bevel - left_top_inset);
+            const POINT inner_fill[] = {
+                { badge.left + left_top_inset, badge.top + left_top_inset },
+                { inner_right - inner_bevel, badge.top + left_top_inset },
+                { inner_right, badge.top + left_top_inset + inner_bevel },
+                { inner_right, inner_bottom },
+                { badge.left + left_top_inset, inner_bottom },
+                { badge.left + left_top_inset, badge.top + left_top_inset }
+            };
+            HRGN fill_region = CreatePolygonRgn(inner_fill, static_cast<int>(std::size(inner_fill)), WINDING);
+            HBRUSH fill_brush = CreateSolidBrush(fill_color);
+            if (fill_region && fill_brush) FillRgn(dc, fill_region, fill_brush);
+            if (fill_region) DeleteObject(fill_region);
+            if (fill_brush) DeleteObject(fill_brush);
+            // Keep the tiny badge outline crisp on high-DPI displays. Its geometry and text scale;
+            // the outline stays one device pixel so it cannot round up to a visibly heavy 2px line.
+            HPEN border = CreatePen(PS_SOLID, 1, color);
             HGDIOBJ old_pen = SelectObject(dc, border);
             Polyline(dc, outline, 6);
             SelectObject(dc, old_pen);
@@ -1847,8 +1884,7 @@ int CCodexUsageItem::GetItemWidthEx(void* hDC) const
 {
     if (!hDC) return 0;
     HDC dc = static_cast<HDC>(hDC);
-    TEXTMETRICW metrics{}; GetTextMetricsW(dc, &metrics);
-    const auto sc = [&](int n) { return MulDiv(n, (std::max)(16L, metrics.tmHeight), 16); };
+    const auto sc = [&](int n) { return ScaleForDpi(dc, n); };
     const auto snapshot = CCodexUsagePlugin::Instance().Snapshot();
     const auto options = CCodexUsagePlugin::Instance().Options();
     int summary_width = 0;
@@ -1882,8 +1918,7 @@ void CCodexUsageItem::DrawItem(void* hDC, int x, int y, int w, int h, bool dark_
     const auto options = CCodexUsagePlugin::Instance().Options();
     const int row_height = options.show_session && options.show_weekly ? h / 2 : h;
     HDC dc = static_cast<HDC>(hDC);
-    TEXTMETRICW metrics{}; GetTextMetricsW(dc, &metrics);
-    const auto sc = [&](int n) { return MulDiv(n, (std::max)(16L, metrics.tmHeight), 16); };
+    const auto sc = [&](int n) { return ScaleForDpi(dc, n); };
     SIZE short_label{}, long_label{};
     GetTextExtentPoint32W(dc, L"5h", 2, &short_label);
     GetTextExtentPoint32W(dc, L"7d", 2, &long_label);

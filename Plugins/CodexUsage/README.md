@@ -58,6 +58,8 @@ The plugin currently displays Codex data only. It includes the custom detail pan
 
 The quota display has ten narrow vertical cells per row. Each cell represents 10%; partial quota fills the cell from the bottom. A thin gray line below each row shows its remaining time ratio. Reset cards show expiry days, switching to hours or minutes near expiry.
 
+Taskbar text, bars, and reset-card geometry follow the host drawing context's DPI. Reset-card outlines stay one physical pixel wide to remain crisp at high scaling levels; their inset fill uses Qoder's light-theme empty-cell gray, separated from the outline by a one-pixel gap.
+
 Click the item to open or close the grouped detail panel. The panel also closes with its close button, Escape, or when the pointer leaves the popup and its opening position. Account, quota and local token data refresh after a 60-second wait following each refresh; visible countdowns update every second. Manual refresh is available in the plugin commands.
 
 Compact quota text shows the percentage directly, without the Chinese `余` prefix. The popup header includes an **Open Codex App** button (Chinese: `打开 Codex App`). It opens the installed Windows app through `shell:AppsFolder\OpenAI.Codex_2p2nqsd0c76g0!App`; the desktop app must be installed. This launches the desktop app rather than the Codex CLI.
