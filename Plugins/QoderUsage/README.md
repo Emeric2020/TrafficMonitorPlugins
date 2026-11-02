@@ -2,7 +2,7 @@
 
 TrafficMonitor 的 Qoder / WorkBuddy 额度监控插件。自动读取当前 Windows 用户已登录的桌面应用凭据，无需配置 token。
 
-## 显示项目与命名（0.4.0）
+## 显示项目与命名（0.5.0）
 
 显示设置、任务栏文字、详情标题、应用按钮及插件命令统一使用以下短名称；无 `CN` 后缀为国际版。
 
@@ -20,8 +20,7 @@ TrafficMonitor 的 Qoder / WorkBuddy 额度监控插件。自动读取当前 Win
 
 `WorkBuddy` 读取国际版 `WorkBuddyAI.exe` 的登录状态，`WorkBuddyCN` 读取中国版 `WorkBuddy.exe` 的登录状态，原中国版显示项仅更名，ID 不变。插件命令分别提供两项详情。
 
-- 第一行：十段剩余积分条、剩余百分比和北京时间自然日倒计时。
-- 第二行明确显示版本，例如 `WorkBuddyCN 2200/2200`、`WorkBuddy 350/350`，背景绘制各自最近 24 小时消耗。刷新频率、主题和工作时间安排与 Qoder 共用。
+- 每个应用占一行，连续进度条内显示明确版本和剩余/合计，例如 `WorkBuddyCN 2200/2200`、`WorkBuddy 350/350`。与 Qoder / QoderCN 采用相同布局和配色，刷新频率共用。
 - 左键打开对应版本详情，标题、区域（中国 cn / 国际 global）、登录来源均区分版本；“打开 WorkBuddyCN”或“打开 WorkBuddy”按钮启动对应客户端。
 - 中国版使用 `WorkBuddyUsage.history`，国际版使用 `WorkBuddyInternationalUsage.history`，与 `QoderUsage.history` 分开；版本、账号或总量变化时重建相应基线。一版失败不会覆盖另一版余额。请求失败时显示占位符及错误状态，不把旧值冒充为最新余额。
 
@@ -56,9 +55,13 @@ Content-Type: application/json
 - [CodexBar WorkBuddy 接入说明](https://github.com/steipete/CodexBar/blob/main/docs/workbuddy.md)：summary 字段、分组重复计数、冻结量、Cookie 与 User-Agent 绑定、可选套餐接口。
 - [zcode-workbuddy-connect](https://github.com/hawchou1995/zcode-workbuddy-connect#workbuddy-56-encrypted-credentials)：利用已安装应用运行时读取加密凭据，密钥仅留内存。
 
-当前支持默认安装位置的 **中国版和国际版个人账号**（`Program Files` 或 `%LOCALAPPDATA%\Programs` 下的对应版本目录）。企业配额和自定义安装位置尚未接入。summary 不提供积分包到期/重置时间，插件不推测；细时间条仅代表自然日进度。billing 和桌面加密方式属于客户端内部接口，升级后若变化需适配。
+当前支持默认安装位置的 **中国版和国际版个人账号**（`Program Files` 或 `%LOCALAPPDATA%\Programs` 下的对应版本目录）。企业配额和自定义安装位置尚未接入。summary 不提供积分包到期/重置时间，插件不推测。billing 和桌面加密方式属于客户端内部接口，升级后若变化需适配。
 
 ### 验证记录
+
+0.5.0 宽度调整（2026-11-03）：取消 `88888.8/88888.8` 样例的最小宽度，按当前文字和必要边距测量，同列由宿主取较长行宽度。Release x64 与四档 DPI 绘制回归通过，已检查收窄后的 GDI 预览；已备份并部署，单个宿主进程、加载路径、构建/安装 SHA256 一致及显示选择保留均确认。
+
+0.5.0（2026-11-03）：Release x64 构建通过。`QoderQuotaDrawingTests.cpp` 的 96/120/144/192 DPI 绘制检查全部通过，包含连续填充比例、20%/50% 边界、四项原 ID 与单行标志、零/无数据/超额余额、文字适配、1px 边框和背景间隙、绘图状态与 GDI 对象检查；已目视检查生成的 144 DPI 原生 GDI 预览。已备份旧 DLL 并部署到本机，正常重启后确认单个宿主进程、实际加载插件路径、构建/安装 SHA256 一致，宿主显示勾选及排列设置保留，TrafficMonitor 保持运行。真实任务栏外观及跨显示器 DPI 切换尚待人工验收。
 
 0.4.0（2026-11-02）：Release x64 构建通过。新增 `QoderDesktopAuthTests.cpp`，使用合成 DPAPI/AES-GCM 登录文件验证两版分别读取、QoderCN 缺失时不得回退国际版，以及真实本机两版凭据读取；原 WorkBuddy 解析测试继续通过。动态加载构建 DLL 验证四个准确短名称、原 ID 保留、真实轮询和浅/深色 16/24 像素字号绘制，实测 `Qoder 2180/2700`、`QoderCN 100/100`、`WorkBuddy 350/350`、`WorkBuddyCN 2200/2200`，关闭正常。已部署到本机并正常重启，单个宿主进程和插件加载路径确认，构建/安装 SHA256 一致，保留已有配置与显示选择；宿主已生成独立 `QoderCNUsage.history`。
 
@@ -77,18 +80,27 @@ QoderDesktopAuthTests.exe
 QoderDesktopAuthTests.exe --live
 ```
 
-## Qoder / QoderCN 任务栏显示
+## 两行任务栏进度条（0.5.0）
 
-固定两行，字体与尺寸跟随 TrafficMonitor：
+每个应用改为独立的单行项目。在任务栏右键 → **显示设置** 中，从 `Qoder`、`QoderCN`、`WorkBuddy`、`WorkBuddyCN` 勾选需要的两个应用；关闭宿主的“水平排列”后，两个项目共用一列，上下两行等宽显示。沿用四个原 ID，升级不改插件启用状态、显示勾选或其他宿主偏好。宿主仍允许选择更多项目；按原有顺序每两项成列，其他单行监控项也参与宿主配对。
 
-- 第一行：十段额度方块 + 剩余百分比，例如 `32%`。每段代表 10%，不足一段时从底部填充。方块宽度、间距和填充方向与 Codex 14 格压缩模式下的 5h 行一致；剩余 >50% 为绿色，>20% 且 ≤50% 为橙色，≤20% 为红色。
-- 第二行：`名称 剩余额度/合计额度`，例如 `Qoder 2180/2700` 或 `QoderCN 100/100`。文字背景的柱状图和上方灰色格子反映最近 24 小时的消耗。历史通过本地轮询差值累积，首次运行后逐渐建立，保存在插件配置目录各自的历史文件；额度总量或接口区域变化时重新建立基线。
+- 整行宽度绘制连续进度条，文字置于条内：`名称 剩余额度/合计额度`。不再绘制十段方块、独立百分数、自然日时间条或文字背后的历史柱状图。
+- 填充宽度为 `remaining / total`，剩余 >50% 使用浅绿 `RGB(218,240,220)`，>20% 且 ≤50% 使用浅黄 `RGB(255,243,191)`，≤20% 使用浅红 `RGB(250,225,224)`。边框用对应较深色；灰色未填部分固定使用原浅灰方块色 `RGB(194,202,211)`。浅/深色任务栏均使用浅色填充和深色文字。
+- 参照 Codex 重置卡，用绘图上下文 DPI 缩放条高、内边距和字体；边框保持 **1 个物理像素**，填色与边框之间留 **1 个物理像素** 的背景间隙。字体保留宿主字体、缩小至约 85%，不足行高时再缩小并垂直居中；测量宽度使用相同字体，只按当前显示文字加两侧必要边距计算，不再为多位小数样例预留额外空间；宿主每秒重新测量，同列取当前较长一行的宽度，首次数据到达或位数变化时同步调整。
+- 无数据时显示 `--/--` 和灰条，不显示旧余额；零余额显示 `0/总额`。WorkBuddy 超额余额保留实际文字，条宽最多填满；已确认 `0/0` 与无数据区分。
 
-合计计算包含接口返回且可用的用户额度、附加额度、组织资源包和专属资源包，以 `合计 remaining / 合计 total` 计算百分比，不使用接口可能存在舍入差异的百分比。无数据时显示占位符。
+Qoder 合计包含接口返回且可用的用户额度、附加额度、组织资源包和专属资源包，以合计余额计算比例，不使用接口可能有舍入差异的百分比。各应用的本地历史文件仍保留记录，账号、区域或总量变化时重建基线。
 
-方块下方的细时间条是**当前北京时间自然日 00:00 到次日 00:00 的倒计时**，按距离次日 00:00 的剩余时间从右侧缩短；工作/休息配色和工作时段边界与 Codex 5h 条一致。选项中可设置单双休安排，以及上午、下午工作时段的起止时间。它不表示套餐到期或已领取状态，也不会自动领取活动奖励。第二行倒计时仍表示接口返回的额度周期到期时间。
+### 绘制回归检查
 
-时间条复用 Codex 5h 条的工作/休息配色、配置的工作时段边界和工作日安排。读取 DLL 旁的 `calendar/YYYY.txt`，支持节假日和调休；文件格式见 [Codex 日历说明](../CodexUsage/README.md#configurable-workdays-and-holidays)。日历随用量刷新重新加载，无文件时按周一至周五判断。
+从 VS x64 开发者命令行运行（不要定义 `NDEBUG`）：
+
+```bat
+cl /nologo /EHsc /std:c++17 /utf-8 /wd4100 /I include Plugins\QoderUsage\QoderQuotaDrawingTests.cpp Plugins\QoderUsage\QoderDesktopAuth.cpp Plugins\QoderUsage\WorkBuddyUsage.cpp /Fe:QoderQuotaDrawingTests.exe /link user32.lib gdi32.lib crypt32.lib bcrypt.lib advapi32.lib
+QoderQuotaDrawingTests.exe <预览输出目录>
+```
+
+测试通过替换 GDI 报告的 DPI，在不更改 Windows 设置的情况下执行真实绘制代码，覆盖 96/120/144/192 DPI、四项 ID/单行标志、阶段边界与连续填充比例、零/未知/超额余额、文字适配、1px 边框与留白、绘图状态恢复和 1000 次绘制的 GDI 对象数量。生成各 DPI 的 BMP 供目视检查；此检查不等同于在所有真实显示器缩放设置下验收宿主。
 
 ## 详情气泡与应用按钮
 
@@ -111,7 +123,7 @@ MSBuild.exe Plugins\QoderUsage\QoderUsage.vcxproj /p:Configuration=Release /p:Pl
 
 ## 配置与凭据
 
-选项提供刷新频率（1/5/15/60 分）、主题、固定区域说明、低额度预警阈值，保存在宿主插件配置目录的 `QoderUsage.ini`。旧选项中的进度条样式、合计/周期开关仍保留配置兼容，但不改变当前固定十段、两行任务栏布局。
+选项提供刷新频率（1/5/15/60 分）、原低额度预警阈值和显示选择说明，保存在宿主插件配置目录的 `QoderUsage.ini`。旧主题、进度条样式、合计/周期开关与工作时间设置保留配置兼容，已从选项界面移除，不改变新的单行连续条布局。
 
 仅支持桌面应用 OAuth token；Personal Access Token 不适用于此用量接口。凭据分别探测当前用户 `%APPDATA%` 下对应区域的目录，每个目录都需要 `Local State` 和 `auth.v1.dat`：
 

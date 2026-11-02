@@ -9,7 +9,6 @@
 #include "OptionsResource.h"
 #include "PluginTooltipGuard.h"
 #include "PluginAppButton.h"
-#include "../CodexUsage/TimeBarMarkers.h"
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
 
@@ -123,26 +122,6 @@ namespace
     long long Now()
     {
         return static_cast<long long>(std::time(nullptr));
-    }
-
-    std::wstring FormatClock(int minute)
-    {
-        wchar_t text[6]{};
-        swprintf_s(text, L"%02d:%02d", minute / 60, minute % 60);
-        return text;
-    }
-
-    bool ParseClock(HWND dialog, int id, int& minute)
-    {
-        wchar_t text[16]{};
-        GetDlgItemTextW(dialog, id, text, static_cast<int>(std::size(text)));
-        if (wcslen(text) != 5 || text[2] != L':') return false;
-        for (int i : { 0, 1, 3, 4 }) if (text[i] < L'0' || text[i] > L'9') return false;
-        const int hour = (text[0] - L'0') * 10 + text[1] - L'0';
-        const int mins = (text[3] - L'0') * 10 + text[4] - L'0';
-        if (hour > 23 || mins > 59) return false;
-        minute = hour * 60 + mins;
-        return true;
     }
 
     long long ParseEpoch(const JsonValue* value)
@@ -430,24 +409,6 @@ namespace
         TEXTMETRICW metrics{};
         GetTextMetricsW(dc, &metrics);
         return MulDiv(n, (std::max)(16L, metrics.tmHeight), 16);
-    }
-
-    int CompactSessionBarWidth(HDC dc)
-    {
-        const int compact_width = ScaleFromHeight(dc, 69);
-        constexpr int session_gap = 1;
-        constexpr int weekly_gap = 1;
-        for (int delta = 0; delta <= 35; ++delta)
-        {
-            const int candidates[] = { compact_width + delta, compact_width - delta };
-            for (const int candidate : candidates)
-            {
-                if (candidate > 0 && (candidate - 9 * session_gap) % 10 == 0 &&
-                    (candidate - 13 * weekly_gap) % 14 == 0)
-                    return candidate;
-            }
-        }
-        return compact_width;
     }
 
     void DrawText(HDC dc, const RECT& rect, const std::wstring& text, COLORREF color, UINT align = DT_LEFT)
@@ -915,49 +876,17 @@ namespace
                 cn ? std::initializer_list<const wchar_t*>{ L"1 分钟", L"5 分钟", L"15 分钟", L"1 小时" }
                    : std::initializer_list<const wchar_t*>{ L"1 minute", L"5 minutes", L"15 minutes", L"1 hour" },
                 options.poll_seconds == 300 ? 1 : options.poll_seconds == 900 ? 2 : options.poll_seconds == 3600 ? 3 : 0);
-            combo(IDC_QODER_THEME,
-                cn ? std::initializer_list<const wchar_t*>{ L"跟随 TrafficMonitor", L"浅色", L"深色" }
-                   : std::initializer_list<const wchar_t*>{ L"Follow TrafficMonitor", L"Light", L"Dark" },
-                options.theme);
-            combo(IDC_QODER_BAR,
-                cn ? std::initializer_list<const wchar_t*>{ L"分段", L"连续" }
-                   : std::initializer_list<const wchar_t*>{ L"Segmented", L"Continuous" },
-                options.bar_style);
-            combo(IDC_QODER_REGION,
-                cn ? std::initializer_list<const wchar_t*>{ L"按显示项固定区域" }
-                   : std::initializer_list<const wchar_t*>{ L"Fixed per display item" }, 0);
-            EnableWindow(GetDlgItem(dialog, IDC_QODER_REGION), FALSE);
             combo(IDC_QODER_ALERT,
                 cn ? std::initializer_list<const wchar_t*>{ L"关", L"50%", L"25%", L"10%" }
                    : std::initializer_list<const wchar_t*>{ L"Off", L"50%", L"25%", L"10%" },
                 options.alert_threshold);
-            combo(IDC_QODER_REST_SCHEDULE, cn
-                ? std::initializer_list<const wchar_t*>{ L"双休（周六、周日休）", L"单休（周日休）", L"单双轮休 A（A 周双休）", L"单双轮休 B（B 周双休）" }
-                : std::initializer_list<const wchar_t*>{ L"Two days off (Sat/Sun)", L"One day off (Sun)", L"Alternating A (A week: Sat/Sun off)", L"Alternating B (B week: Sat/Sun off)" },
-                options.rest_schedule);
-            CheckDlgButton(dialog, IDC_QODER_TOTAL, options.show_total ? BST_CHECKED : BST_UNCHECKED);
-            CheckDlgButton(dialog, IDC_QODER_CYCLE, options.show_cycle ? BST_CHECKED : BST_UNCHECKED);
-            SetDlgItemTextW(dialog, IDC_QODER_MORNING_START, FormatClock(options.morning_start).c_str());
-            SetDlgItemTextW(dialog, IDC_QODER_MORNING_END, FormatClock(options.morning_end).c_str());
-            SetDlgItemTextW(dialog, IDC_QODER_AFTERNOON_START, FormatClock(options.afternoon_start).c_str());
-            SetDlgItemTextW(dialog, IDC_QODER_AFTERNOON_END, FormatClock(options.afternoon_end).c_str());
 
             if (cn)
             {
                 const std::pair<int, const wchar_t*> labels[] = {
                     { IDC_QODER_POLL_LABEL, L"刷新频率" },
-                    { IDC_QODER_THEME_LABEL, L"主题" },
-                    { IDC_QODER_BAR_LABEL, L"额度进度条" },
-                    { IDC_QODER_REGION_LABEL, L"API 区域" },
                     { IDC_QODER_ALERT_LABEL, L"低额度预警" },
-                    { IDC_QODER_TOTAL, L"显示合计用量" },
-                    { IDC_QODER_CYCLE, L"显示到期倒计时" },
-                    { IDC_QODER_SCHEDULE_LABEL, L"每周休息安排" },
-                    { IDC_QODER_MORNING_LABEL, L"上午时段" },
-                    { IDC_QODER_AFTERNOON_LABEL, L"下午时段" },
-                    { IDC_QODER_MORNING_TO, L"至" },
-                    { IDC_QODER_AFTERNOON_TO, L"至" },
-                    { IDC_QODER_HINT, L"窗口位置和背景由 TrafficMonitor 控制。" },
+                    { IDC_QODER_HINT, L"任务栏右键 → 显示设置：从 Qoder、QoderCN、WorkBuddy、WorkBuddyCN 中勾选两项。\r\n关闭“水平排列”后，两项上下显示。进度条表示剩余额度，填色随剩余比例显示浅绿、浅黄、浅红。" },
                     { IDOK, L"确定" }, { IDCANCEL, L"取消" },
                 };
                 for (const auto& label : labels) SetDlgItemTextW(dialog, label.first, label.second);
@@ -993,33 +922,8 @@ namespace
                 const int intervals[] = { 60, 300, 900, 3600 };
                 options.poll_seconds = intervals[(std::clamp)(
                     static_cast<int>(SendDlgItemMessageW(dialog, IDC_QODER_POLL, CB_GETCURSEL, 0, 0)), 0, 3)];
-                options.theme = (std::clamp)(
-                    static_cast<int>(SendDlgItemMessageW(dialog, IDC_QODER_THEME, CB_GETCURSEL, 0, 0)), 0, 2);
-                options.bar_style = (std::clamp)(
-                    static_cast<int>(SendDlgItemMessageW(dialog, IDC_QODER_BAR, CB_GETCURSEL, 0, 0)), 0, 1);
                 options.alert_threshold = (std::clamp)(
                     static_cast<int>(SendDlgItemMessageW(dialog, IDC_QODER_ALERT, CB_GETCURSEL, 0, 0)), 0, 3);
-                options.show_total = IsDlgButtonChecked(dialog, IDC_QODER_TOTAL) == BST_CHECKED;
-                options.show_cycle = IsDlgButtonChecked(dialog, IDC_QODER_CYCLE) == BST_CHECKED;
-                options.rest_schedule = static_cast<int>(SendDlgItemMessageW(dialog, IDC_QODER_REST_SCHEDULE, CB_GETCURSEL, 0, 0));
-                if (options.rest_schedule < 0 || options.rest_schedule > 3 ||
-                    !ParseClock(dialog, IDC_QODER_MORNING_START, options.morning_start) ||
-                    !ParseClock(dialog, IDC_QODER_MORNING_END, options.morning_end) ||
-                    !ParseClock(dialog, IDC_QODER_AFTERNOON_START, options.afternoon_start) ||
-                    !ParseClock(dialog, IDC_QODER_AFTERNOON_END, options.afternoon_end))
-                {
-                    MessageBoxW(dialog, cn ? L"请输入有效时间，格式为 HH:mm。" : L"Enter valid times in HH:mm format.",
-                        L"Qoder Usage", MB_OK | MB_ICONINFORMATION);
-                    return TRUE;
-                }
-                if (options.morning_start >= options.morning_end || options.morning_end > options.afternoon_start ||
-                    options.afternoon_start >= options.afternoon_end)
-                {
-                    MessageBoxW(dialog, cn ? L"请确保上午开始 < 上午结束 ≤ 下午开始 < 下午结束。" :
-                        L"Times must satisfy morning start < morning end ≤ afternoon start < afternoon end.",
-                        L"Qoder Usage", MB_OK | MB_ICONINFORMATION);
-                    return TRUE;
-                }
                 if (OptionsEqual(options, CQoderUsagePlugin::Instance().Options()))
                     EndDialog(dialog, IDCANCEL);
                 else if (CQoderUsagePlugin::Instance().SaveOptions(options))
@@ -1064,7 +968,7 @@ const wchar_t* CQoderUsagePlugin::GetInfo(PluginInfoIndex index)
     case TMI_NAME: return L"Qoder Usage";
     case TMI_DESCRIPTION: return L"Qoder quota and WorkBuddy desktop credit monitoring";
     case TMI_AUTHOR: return L"Qoder Usage Monitor contributors";
-    case TMI_VERSION: return L"0.4.0";
+    case TMI_VERSION: return L"0.5.0";
     case TMI_URL: return L"https://github.com/wang-yichun/qoder-usage-monitor";
     default: return L"";
     }
@@ -1379,12 +1283,6 @@ namespace
         return snapshot.has_data ? (credits.second > 0.0 ? credits.first / credits.second * 100.0 : 0.0) : -1.0;
     }
 
-    std::wstring RemainingPercent(const QoderSnapshot& snapshot, bool workbuddy)
-    {
-        const double remaining = CombinedRemaining(snapshot, workbuddy);
-        return (remaining < 0.0 ? std::wstring(L"--") : std::to_wstring(static_cast<int>(std::lround((std::min)(100.0, remaining))))) + L"%";
-    }
-
     std::wstring CompactSummary(const QoderSnapshot& snapshot, QuotaProvider provider)
     {
         const auto credits = CombinedCredits(snapshot, IsWorkBuddy(provider));
@@ -1392,131 +1290,108 @@ namespace
             ? FormatNumber(credits.first) + L"/" + FormatNumber(credits.second) : L"--/--");
     }
 
-    void DrawRecentHistogram(HDC dc, const RECT& area, const std::vector<double>& buckets)
+    int QuotaScale(HDC dc, int value)
     {
-        const int width = area.right - area.left, height = area.bottom - area.top;
-        if (width <= 0 || height <= 2 || buckets.empty()) return;
-        const int columns = (std::min)(width, 96);
-        const size_t per_column = 15;
-        const size_t start = buckets.size() > static_cast<size_t>(columns) * per_column
-            ? buckets.size() - static_cast<size_t>(columns) * per_column : 0;
-        std::vector<double> values(columns, 0.0);
-        double maximum = 0;
-        for (int i = 0; i < columns; ++i)
-            for (size_t j = start + i * per_column; j < (std::min)(start + (i + 1) * per_column, buckets.size()); ++j)
-                maximum = (std::max)(maximum, values[i] += buckets[j]);
-        if (maximum <= 0) return;
-        HBRUSH brush = CreateSolidBrush(RGB(194, 202, 211));
-        if (!brush) return;
-        for (int i = 0; i < columns; ++i)
-            if (values[i] > 0)
-            {
-                const int bar_height = (std::max)(1, static_cast<int>(std::lround((height - 2) * values[i] / maximum)));
-                RECT bar{area.right - columns + i, area.bottom - bar_height, area.right - columns + i + 1, area.bottom};
-                FillRect(dc, &bar, brush);
-            }
-        DeleteObject(brush);
+        const int dpi = GetDeviceCaps(dc, LOGPIXELSX);
+        return MulDiv(value, dpi > 0 ? dpi : USER_DEFAULT_SCREEN_DPI, USER_DEFAULT_SCREEN_DPI);
     }
 
+    // Measurement and drawing use the same smaller host font. Short rectangles may
+    // reduce it further, keeping the host typeface while avoiding vertical clipping.
+    HFONT QuotaFont(HDC dc, int available_height = 0)
+    {
+        LOGFONTW font{};
+        if (!GetObjectW(GetCurrentObject(dc, OBJ_FONT), sizeof(font), &font))
+        {
+            font.lfHeight = -QuotaScale(dc, 12);
+            wcscpy_s(font.lfFaceName, L"Segoe UI");
+        }
+        font.lfHeight = -(std::max)(1, MulDiv((std::max)(1L, std::abs(font.lfHeight)), 85, 100));
+        font.lfWidth = 0;
+        font.lfQuality = CLEARTYPE_QUALITY;
+        HFONT result = CreateFontIndirectW(&font);
+        if (available_height > 0 && result)
+        {
+            HGDIOBJ old = SelectObject(dc, result);
+            TEXTMETRICW metrics{};
+            GetTextMetricsW(dc, &metrics);
+            SelectObject(dc, old);
+            if (metrics.tmHeight > available_height)
+            {
+                font.lfHeight = -(std::max)(1, MulDiv(-font.lfHeight, available_height, metrics.tmHeight));
+                DeleteObject(result);
+                result = CreateFontIndirectW(&font);
+            }
+        }
+        return result;
+    }
 }
 
 int CQoderUsageItem::GetItemWidthEx(void* hDC) const
 {
-    if (!hDC) return 320;
+    if (!hDC) return GetItemWidth();
     HDC dc = static_cast<HDC>(hDC);
-    const auto snapshot = CQoderUsagePlugin::Instance().Snapshot(m_provider);
-    const auto summary = CompactSummary(snapshot, m_provider);
+    HFONT font = QuotaFont(dc);
+    HGDIOBJ old_font = font ? SelectObject(dc, font) : nullptr;
+    const auto summary = CompactSummary(CQoderUsagePlugin::Instance().Snapshot(m_provider), m_provider);
     SIZE size{};
     GetTextExtentPoint32W(dc, summary.c_str(), static_cast<int>(summary.size()), &size);
-    {
-        // The host measures once before the first asynchronous billing result arrives.
-        const std::wstring sample = std::wstring(ProviderName(m_provider))
-            + (IsWorkBuddy(m_provider) ? L" 88888.8/88888.8" : L" 8888.8/8888.8");
-        SIZE minimum{};
-        GetTextExtentPoint32W(dc, sample.c_str(), static_cast<int>(sample.size()), &minimum);
-        size.cx = (std::max)(size.cx, minimum.cx);
-    }
-    SIZE percent_size{};
-    GetTextExtentPoint32W(dc, L"100%", 4, &percent_size);
-    return (std::max)(static_cast<int>(size.cx),
-        CompactSessionBarWidth(dc) + ScaleFromHeight(dc, 8) + static_cast<int>(percent_size.cx))
-        + ScaleFromHeight(dc, 4);
+    if (old_font) SelectObject(dc, old_font);
+    if (font) DeleteObject(font);
+    // The host remeasures each second and shares the larger width within a column.
+    return size.cx + 2 * (std::max)(3, QuotaScale(dc, 4));
 }
 
-void CQoderUsageItem::DrawItem(void* hDC, int x, int y, int w, int h, bool dark_mode)
+void CQoderUsageItem::DrawItem(void* hDC, int x, int y, int w, int h, bool /*dark_mode*/)
 {
     if (!hDC || w <= 0 || h <= 0) return;
     HDC dc = static_cast<HDC>(hDC);
     const int saved = SaveDC(dc);
+    if (!saved) return;
     IntersectClipRect(dc, x, y, x + w, y + h);
-    const auto options = CQoderUsagePlugin::Instance().Options();
     const auto snapshot = CQoderUsagePlugin::Instance().Snapshot(m_provider);
-    if (options.theme != 0) dark_mode = options.theme == 2;
-    TEXTMETRICW metrics{}; GetTextMetricsW(dc, &metrics);
-    const auto sc = [&](int n) { return MulDiv(n, (std::max)(16L, metrics.tmHeight), 16); };
-    const int row_height = h / 2;
-    const int left = x + sc(2);
     const double remaining = CombinedRemaining(snapshot, IsWorkBuddy(m_provider));
-    const COLORREF filled = remaining <= 20.0
-        ? (dark_mode ? RGB(242, 139, 130) : RGB(197, 34, 31))
-        : remaining <= 50.0
-            ? (dark_mode ? RGB(253, 214, 99) : RGB(227, 116, 0))
-            : (dark_mode ? RGB(129, 201, 149) : RGB(24, 128, 56));
-    const COLORREF empty = dark_mode ? RGB(82, 91, 101) : RGB(194, 202, 211);
-    const int gap = 1;
-    const int quota_bar_width = CompactSessionBarWidth(dc);
-    const int cell_width = (quota_bar_width - 9 * gap) / 10;
-    const int bar_height = (std::max)(2, (std::min)(sc(13), row_height - 1 - sc(2) - (std::max)(3, sc(3))));
-    const int top = y + (std::max)(2, sc(1)) + 1
-        + (std::max)(0, (row_height - bar_height - 1 - sc(2) - (std::max)(3, sc(3))) / 2);
-    for (int i = 0; i < 10; ++i)
+    const COLORREF empty = RGB(194, 202, 211); // light gray of the previous quota cells
+    const COLORREF fill = remaining <= 20.0 ? RGB(250, 225, 224)
+        : remaining <= 50.0 ? RGB(255, 243, 191) : RGB(218, 240, 220);
+    const COLORREF outline = remaining < 0.0 ? empty
+        : remaining <= 20.0 ? RGB(198, 83, 79)
+        : remaining <= 50.0 ? RGB(177, 140, 51) : RGB(94, 151, 104);
+    const int bar_height = (std::min)(h, (std::max)(5, QuotaScale(dc, 18)));
+    const int top = y + (h - bar_height) / 2;
+    const RECT bar{ x, top, x + w, top + bar_height };
+    const auto paint = [&](const RECT& rect, COLORREF color) {
+        if (rect.right <= rect.left || rect.bottom <= rect.top) return;
+        HBRUSH brush = CreateSolidBrush(color);
+        if (brush) { FillRect(dc, &rect, brush); DeleteObject(brush); }
+    };
+    // Like Codex reset cards: geometry/text scale with DPI, while the outline
+    // and visible gap each remain exactly one physical pixel at every scale.
+    if (w >= 5 && bar_height >= 5)
     {
-        RECT cell{left + i * (cell_width + gap), top, left + i * (cell_width + gap) + cell_width, top + bar_height};
-        HBRUSH brush = CreateSolidBrush(empty);
-        FillRect(dc, &cell, brush); DeleteObject(brush);
-        const double recent_covered = remaining < 0.0 ? 0.0 : CodexRecent::Coverage(
-            (std::min)(100.0, remaining + snapshot.recent_percent), 10, i);
-        const int recent_height = static_cast<int>(std::lround(bar_height * recent_covered));
-        RECT recent_fill{cell.left, cell.bottom - recent_height, cell.right, cell.bottom};
-        brush = CreateSolidBrush(dark_mode ? RGB(101, 110, 120) : RGB(174, 183, 193));
-        FillRect(dc, &recent_fill, brush); DeleteObject(brush);
-        const double covered = remaining < 0.0 ? 0.0 : (std::clamp)(remaining / 10.0 - i, 0.0, 1.0);
-        const int fill_height = static_cast<int>(std::lround(bar_height * covered));
-        if (fill_height > 0)
-        {
-            RECT fill{cell.left, cell.bottom - fill_height, cell.right, cell.bottom};
-            brush = CreateSolidBrush(filled);
-            FillRect(dc, &fill, brush); DeleteObject(brush);
-        }
+        RECT inner{ bar.left + 2, bar.top + 2, bar.right - 2, bar.bottom - 2 };
+        paint(inner, empty);
+        const int filled_width = static_cast<int>(std::lround((inner.right - inner.left)
+            * (std::clamp)(remaining, 0.0, 100.0) / 100.0));
+        RECT progress{ inner.left, inner.top, inner.left + filled_width, inner.bottom };
+        paint(progress, fill);
     }
-    // Countdown through the current Beijing calendar day: now to 00:00 tomorrow.
-    constexpr long long duration = 86400;
-    const long long now = Now();
-    const long long reset = ((now + 8 * 3600) / duration + 1) * duration - 8 * 3600;
-    const int drawn_width = 10 * (cell_width + gap) - gap;
-    const int visible_width = static_cast<int>(std::lround(drawn_width * static_cast<double>(reset - now) / duration));
-    const CodexTimeBar::Schedule schedule{ options.rest_schedule, options.morning_start, options.morning_end,
-        options.afternoon_start, options.afternoon_end };
-    const auto markers = CodexTimeBar::MarkerPixels(now, reset, false, drawn_width, snapshot.calendar, duration, schedule);
-    HBRUSH work = CreateSolidBrush(dark_mode ? RGB(138, 144, 153) : RGB(107, 114, 128));
-    HBRUSH rest = CreateSolidBrush(dark_mode ? RGB(110, 118, 130) : RGB(151, 160, 174));
-    for (int pixel = 0; pixel < visible_width; ++pixel)
+    HBRUSH border = CreateSolidBrush(outline);
+    if (border) { FrameRect(dc, &bar, border); DeleteObject(border); }
+    const int padding = (std::max)(3, QuotaScale(dc, 4));
+    RECT text{ bar.left + padding, bar.top + 2, bar.right - padding, bar.bottom - 2 };
+    if (text.right > text.left && text.bottom > text.top)
     {
-        if (std::binary_search(markers.begin(), markers.end(), pixel)) continue;
-        const long long timestamp = (std::max)(now, reset - static_cast<long long>((pixel + 0.5) * duration / drawn_width));
-        RECT section{left + pixel, top + bar_height + 1, left + pixel + 1, top + bar_height + 1 + sc(2)};
-        FillRect(dc, &section, CodexTimeBar::IsWorkingTime(timestamp, false, snapshot.calendar, schedule) ? work : rest);
+        HFONT font = QuotaFont(dc, text.bottom - text.top);
+        HGDIOBJ old_font = font ? SelectObject(dc, font) : nullptr;
+        // Both taskbar themes have pale fills, requiring dark text for contrast.
+        DrawText(dc, text, CompactSummary(snapshot, m_provider), RGB(45, 49, 54));
+        if (old_font) SelectObject(dc, old_font);
+        if (font) DeleteObject(font);
     }
-    DeleteObject(work);
-    DeleteObject(rest);
-    RECT percent_rect{left + drawn_width + sc(8), y, x + w, y + row_height};
-    DrawText(dc, percent_rect, RemainingPercent(snapshot, IsWorkBuddy(m_provider)), dark_mode ? RGB(235, 238, 242) : RGB(45, 49, 54), DT_LEFT);
-    RECT text_rect{left, y + row_height, x + w, y + h};
-    RECT histogram_rect{ text_rect.left, text_rect.top + sc(1), text_rect.right, text_rect.bottom - sc(1) };
-    DrawRecentHistogram(dc, histogram_rect, snapshot.recent_buckets);
-    DrawText(dc, text_rect, CompactSummary(snapshot, m_provider), dark_mode ? RGB(235, 238, 242) : RGB(45, 49, 54), DT_LEFT);
-    if (saved) RestoreDC(dc, saved);
+    RestoreDC(dc, saved);
 }
+
 int CQoderUsageItem::OnMouseEvent(MouseEventType type, int /*x*/, int /*y*/, void* hWnd, int /*flag*/)
 {
     if (type == MT_LCLICKED)
