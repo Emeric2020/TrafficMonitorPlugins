@@ -1,10 +1,20 @@
 #include <Windows.h>
 #include <Winhttp.h>
+#include <objidl.h>
+#include <gdiplus.h>
+#include <Shlwapi.h>
+#pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "shlwapi.lib")
 
 #include "CodexUsagePlugin.h"
+#include "RemoteSnapshotCache.h"
 #include "JsonValue.h"
 #include "TimeBarMarkers.h"
 #include "OptionsResource.h"
+#include "PluginTooltipGuard.h"
+#include "PluginAppButton.h"
+#pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "shell32.lib")
 
 #include <algorithm>
 #include <ctime>
@@ -22,14 +32,20 @@
 
 namespace
 {
+    int ScaleForDpi(HDC dc, int value)
+    {
+        const int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSX) : USER_DEFAULT_SCREEN_DPI;
+        return MulDiv(value, dpi > 0 ? dpi : USER_DEFAULT_SCREEN_DPI, USER_DEFAULT_SCREEN_DPI);
+    }
+
     constexpr wchar_t kUsageHost[] = L"chatgpt.com";
     constexpr wchar_t kUsagePath[] = L"/backend-api/wham/usage";
     constexpr wchar_t kCreditsPath[] = L"/backend-api/wham/rate-limit-reset-credits";
-    constexpr int kResetCardColumnPitch = 15;
     constexpr DWORD kHttpTimeoutMs = 5000;
     constexpr wchar_t kDetailPopupClass[] = L"TrafficMonitorCodexUsageDetails";
 
     HWND g_detail_popup{};
+    PluginTooltipGuard g_tooltip_guard;
     HINSTANCE g_popup_instance{};
     bool g_popup_tracking_mouse{};
     std::vector<std::wstring> g_popup_lines;
@@ -517,12 +533,20 @@ namespace
             + (chinese ? L" 亿）" : L" x 100M)");
     }
 
-    std::wstring Countdown(long long reset)
+    std::wstring Countdown(long long reset, bool weekly)
     {
         if (reset <= 0) return L"--";
         const long long remaining = (std::max)(0LL, reset - static_cast<long long>(time(nullptr)));
         const long long hours = remaining / 3600;
         const long long minutes = (remaining % 3600) / 60;
+        if (remaining < 3600)
+        {
+            std::wostringstream out;
+            out << (remaining / 60) << L'\'' << std::setw(2) << std::setfill(L'0') << (remaining % 60) << L'"';
+            return out.str();
+        }
+        if (weekly && remaining < 86400)
+            return std::to_wstring(hours) + L"h" + std::to_wstring(minutes) + L"m";
         if (hours >= 24)
         {
             std::wostringstream out; out << (hours / 24) << L"d " << (hours % 24) << L"h"; return out.str();
@@ -534,7 +558,7 @@ namespace
     {
         if (expiry <= 0) return L"?";
         const long long seconds = (std::max)(0LL, expiry - static_cast<long long>(time(nullptr)));
-        if (seconds < 3600) return std::to_wstring(seconds / 60) + L"m";
+        if (seconds < 3600) return std::to_wstring(seconds / 60) + L"'";
         if (seconds < 86400) return std::to_wstring(seconds / 3600) + L"h";
         return std::to_wstring(seconds / 86400);
     }
@@ -556,10 +580,10 @@ namespace
             return std::wstring(CCodexUsagePlugin::Instance().IsChinese() ? L"剩余 " : L"Remaining ")
                 + std::to_wstring(static_cast<int>(std::lround(remaining))) + L"% · "
                 + (CCodexUsagePlugin::Instance().IsChinese() ? L"重置 " : L"Resets ")
-                + Countdown(weekly ? snapshot.weekly_reset : snapshot.session_reset);
-        return std::wstring(CCodexUsagePlugin::Instance().IsChinese() ? L"余" : L"")
+                + Countdown(weekly ? snapshot.weekly_reset : snapshot.session_reset, weekly);
+        return std::wstring(CCodexUsagePlugin::Instance().IsChinese() ? L"" : L"")
             + std::to_wstring(static_cast<int>(std::lround(remaining))) + L"% · "
-            + Countdown(weekly ? snapshot.weekly_reset : snapshot.session_reset);
+            + Countdown(weekly ? snapshot.weekly_reset : snapshot.session_reset, weekly);
     }
 
     void DrawText(HDC dc, const RECT& rect, const std::wstring& text, COLORREF color, UINT align = DT_LEFT)
@@ -632,6 +656,10 @@ namespace
     {
         switch (message)
         {
+        case WM_SHOWWINDOW:
+            if (wParam) g_tooltip_guard.Acquire(GetWindow(hwnd, GW_OWNER));
+            else g_tooltip_guard.Release();
+            break;
         case WM_ERASEBKGND:
             return 1;
         case WM_MOUSEMOVE:
@@ -681,6 +709,7 @@ namespace
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
             HGDIOBJ old_font = SelectObject(dc, title_font);
+            PluginAppButton::Draw(hwnd, dc, g_popup_dpi, true);
             RECT title{ MulDiv(14, g_popup_dpi, 96), MulDiv(10, g_popup_dpi, 96), rect.right - MulDiv(14, g_popup_dpi, 96), MulDiv(38, g_popup_dpi, 96) };
             const wchar_t* title_text = chinese ? L"Codex 用量与 Token" : L"Codex usage and tokens";
             ::DrawTextW(dc, title_text, -1, &title, DT_SINGLELINE | DT_VCENTER);
@@ -781,6 +810,7 @@ namespace
             return 0;
         }
         case WM_LBUTTONUP:
+            if (PluginAppButton::Click(hwnd, g_popup_dpi, lParam, true)) return 0;
         {
             RECT rect{}; GetClientRect(hwnd, &rect);
             const int side = MulDiv(32, g_popup_dpi, 96);
@@ -792,6 +822,7 @@ namespace
             ShowWindow(hwnd, SW_HIDE);
             return 0;
         case WM_DESTROY:
+            g_tooltip_guard.Release();
             KillTimer(hwnd, 1);
             KillTimer(hwnd, 2);
             if (g_detail_popup == hwnd) g_detail_popup = nullptr;
@@ -858,6 +889,176 @@ namespace
         InvalidateRect(g_detail_popup, nullptr, FALSE);
     }
 
+    // Visual preview: one shared icon replaces both quota labels.
+    class OfflineIcon
+    {
+    public:
+        OfflineIcon()
+        {
+            Gdiplus::GdiplusStartupInput input;
+            if (Gdiplus::GdiplusStartup(&token, &input, nullptr) != Gdiplus::Ok) return;
+            HMODULE module{};
+            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCWSTR>(&g_detail_popup), &module);
+            HRSRC resource = FindResourceW(module, MAKEINTRESOURCEW(IDR_NETWORK_OFFLINE), RT_RCDATA);
+            if (!resource) return;
+            HGLOBAL data = LoadResource(module, resource);
+            if (!data) return;
+            stream = SHCreateMemStream(static_cast<const BYTE*>(LockResource(data)), SizeofResource(module, resource));
+            if (stream) bitmap = Gdiplus::Bitmap::FromStream(stream);
+            if (bitmap && bitmap->GetLastStatus() == Gdiplus::Ok)
+            {
+                // Ignore transparent margins when fitting the user's icon.
+                int left = bitmap->GetWidth(), top = bitmap->GetHeight(), right = -1, bottom = -1;
+                for (UINT y = 0; y < bitmap->GetHeight(); ++y)
+                    for (UINT x = 0; x < bitmap->GetWidth(); ++x)
+                    {
+                        Gdiplus::Color pixel;
+                        if (bitmap->GetPixel(x, y, &pixel) == Gdiplus::Ok && pixel.GetAlpha() != 0)
+                        {
+                            left = (std::min)(left, static_cast<int>(x));
+                            top = (std::min)(top, static_cast<int>(y));
+                            right = (std::max)(right, static_cast<int>(x));
+                            bottom = (std::max)(bottom, static_cast<int>(y));
+                        }
+                    }
+                if (right >= left && bottom >= top)
+                    source = Gdiplus::Rect(left, top, right - left + 1, bottom - top + 1);
+            }
+        }
+        ~OfflineIcon()
+        {
+            delete bitmap;
+            if (stream) stream->Release();
+            // GDI+ shutdown cannot run under the DLL detach loader lock; process exit reclaims it.
+        }
+        void Draw(HDC dc, int x, int y, int width, int height)
+        {
+            if (!bitmap || bitmap->GetLastStatus() != Gdiplus::Ok || width <= 0 || height <= 0 || source.Width <= 0 || source.Height <= 0) return;
+            const double scale = (std::min)(static_cast<double>(width) / source.Width,
+                static_cast<double>(height) / source.Height);
+            const int iw = (std::max)(1, static_cast<int>(std::lround(source.Width * scale)));
+            const int ih = (std::max)(1, static_cast<int>(std::lround(source.Height * scale)));
+            Gdiplus::Graphics graphics(dc);
+            graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+            graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+            graphics.DrawImage(bitmap, Gdiplus::Rect(x + (width - iw) / 2, y + (height - ih) / 2, iw, ih),
+                source.X, source.Y, source.Width, source.Height, Gdiplus::UnitPixel);
+        }
+    private:
+        ULONG_PTR token{};
+        IStream* stream{};
+        Gdiplus::Bitmap* bitmap{};
+        Gdiplus::Rect source{};
+    };
+
+    struct QuotaBarWidths
+    {
+        int session{};
+        int weekly{};
+
+        int LayoutWidth() const { return (std::max)(session, weekly); }
+    };
+
+    QuotaBarWidths CalculateQuotaBarWidths(int base_width, int compact_width, int weekly_bar_mode,
+        int session_gap, int weekly_gap, bool segmented)
+    {
+        if (!segmented || weekly_bar_mode == 0) return { base_width, base_width };
+
+        // Compact 14-cell mode starts from a narrower shared width; all rows still end on the same pixel.
+        int shared_width = weekly_bar_mode == 2 ? compact_width : base_width;
+        if (weekly_bar_mode == 2)
+        {
+            // Equal 10/14-cell bars with 1px gaps recur every 70px; choose the closest scaled width.
+            for (int delta = 0; delta <= 35; ++delta)
+            {
+                const int candidates[] = { compact_width + delta, compact_width - delta };
+                bool found = false;
+                for (const int candidate : candidates)
+                {
+                    if (candidate > 0 &&
+                        (candidate - 9 * session_gap) % 10 == 0 &&
+                        (candidate - 13 * weekly_gap) % 14 == 0)
+                    {
+                        shared_width = candidate;
+                        found = true;
+                        break;
+                    }
+                }
+                if (found) break;
+            }
+        }
+        else if (weekly_bar_mode >= 2)
+        {
+            for (int candidate = shared_width; candidate <= shared_width + 1000; ++candidate)
+            {
+                if ((candidate - 9 * session_gap) % 10 == 0 &&
+                    (candidate - 13 * weekly_gap) % 14 == 0)
+                {
+                    shared_width = candidate;
+                    break;
+                }
+            }
+        }
+        else
+        {
+            for (int delta = 0; delta <= 35; ++delta)
+            {
+                const int candidates[] = { base_width + delta, base_width - delta };
+                for (const int candidate : candidates)
+                {
+                    if (candidate > 0 &&
+                        (candidate - 9 * session_gap) % 10 == 0 &&
+                        (candidate - 6 * weekly_gap) % 7 == 0)
+                    {
+                        shared_width = candidate;
+                        delta = 36;
+                        break;
+                    }
+                }
+            }
+        }
+        return { shared_width, shared_width };
+    }
+
+    void DrawMinuteHistogram(HDC dc, const RECT& area, const std::vector<double>& buckets, int minutes_per_column, COLORREF color)
+    {
+        const int width = area.right - area.left;
+        const int height = area.bottom - area.top;
+        if (width <= 0 || height <= 2 || buckets.empty() || minutes_per_column <= 0) return;
+
+        const int columns = (std::min)(width,
+            static_cast<int>((buckets.size() + minutes_per_column - 1) / minutes_per_column));
+        if (columns <= 0) return;
+
+        const size_t covered = (std::min)(buckets.size(), static_cast<size_t>(columns) * minutes_per_column);
+        const size_t start_offset = buckets.size() - covered;
+        std::vector<double> values(static_cast<size_t>(columns), 0.0);
+        double maximum = 0.0;
+        for (int column = 0; column < columns; ++column)
+        {
+            const size_t first = start_offset + static_cast<size_t>(column) * minutes_per_column;
+            const size_t last = (std::min)(first + minutes_per_column, buckets.size());
+            for (size_t i = first; i < last; ++i)
+                values[column] += buckets[i];
+            maximum = (std::max)(maximum, values[column]);
+        }
+        if (maximum <= 0.0) return;
+
+        HBRUSH brush = CreateSolidBrush(color);
+        if (!brush) return;
+        const int plot_height = height - 2;
+        const int chart_left = area.right - columns;
+        for (int column = 0; column < columns; ++column)
+        {
+            if (values[column] <= 0.0) continue;
+            const int bar_height = (std::max)(1, static_cast<int>(std::lround(plot_height * values[column] / maximum)));
+            RECT bar{ chart_left + column, area.bottom - bar_height, chart_left + column + 1, area.bottom };
+            FillRect(dc, &bar, brush);
+        }
+        DeleteObject(brush);
+    }
+
     void DrawRow(HDC dc, const CodexSnapshot& snapshot, bool weekly, int x, int y, int w, int h, bool dark)
     {
         const auto options = CCodexUsagePlugin::Instance().Options();
@@ -865,8 +1066,7 @@ namespace
         const bool available = weekly ? snapshot.has_weekly : snapshot.has_session;
         const double used = weekly ? snapshot.weekly_used : snapshot.session_used;
         const long long reset = weekly ? snapshot.weekly_reset : snapshot.session_reset;
-        TEXTMETRICW metrics{}; GetTextMetricsW(dc, &metrics);
-        const auto sc = [&](int n) { return MulDiv(n, (std::max)(16L, metrics.tmHeight), 16); };
+        const auto sc = [&](int n) { return ScaleForDpi(dc, n); };
         const int left = x + sc(2);
         const int row_height = h;
         const COLORREF foreground = dark ? RGB(235, 238, 242) : RGB(45, 49, 54);
@@ -878,19 +1078,29 @@ namespace
                 ? (dark ? RGB(253, 214, 99) : RGB(227, 116, 0))
                 : (dark ? RGB(129, 201, 149) : RGB(24, 128, 56));
         const COLORREF empty = dark ? RGB(82, 91, 101) : RGB(194, 202, 211);
+        const COLORREF recent_color = dark ? RGB(101, 110, 120) : RGB(174, 183, 193);
+        const double recent = weekly ? snapshot.weekly_recent : snapshot.session_recent;
         SIZE short_label{}, long_label{};
         GetTextExtentPoint32W(dc, L"5h", 2, &short_label);
         GetTextExtentPoint32W(dc, L"7d", 2, &long_label);
         const int label_width = (std::max)(short_label.cx, long_label.cx);
         RECT label{ left, y, left + label_width, y + row_height };
-        DrawText(dc, label, weekly ? L"7d" : L"5h", foreground, DT_RIGHT);
+        if (!snapshot.remote_unavailable) DrawText(dc, label, weekly ? L"7d" : L"5h", foreground, DT_RIGHT);
 
-        const int bar_x = label.right + sc(8);
-        const int bar_width = sc(89); // Ten narrow 8px cells with nine 1px gaps.
-        const int gap = options.bar_style == 0 ? sc(1) : 0;
-        const int segments = options.bar_style == 0 ? 10 : 1;
-        const int segment_width = (bar_width - (segments - 1) * gap) / segments;
-        const double filled_segments = remaining * segments / 100.0;
+        const int bar_x = label.right + sc(4);
+        const int base_bar_width = sc(89);
+        const int session_gap = options.weekly_bar_mode >= 2 ? 1 : (std::max)(1, sc(1));
+        const int weekly_gap = options.weekly_bar_mode == 1 ? (std::max)(2, session_gap) :
+            (options.weekly_bar_mode == 0 ? session_gap : 1);
+        const auto bar_widths = CalculateQuotaBarWidths(base_bar_width, sc(69), options.weekly_bar_mode,
+            session_gap, weekly_gap, options.bar_style == 0);
+        const int bar_width = weekly ? bar_widths.weekly : bar_widths.session;
+        const int gap = options.bar_style == 0 ? (weekly ? weekly_gap : session_gap) : 0;
+        const int segments = options.bar_style == 0
+            ? (weekly ? (options.weekly_bar_mode == 1 ? 7 : options.weekly_bar_mode >= 2 ? 14 : 10) : 10)
+            : 1;
+        const int segment_content_width = bar_width - (segments - 1) * gap;
+        const int segment_width = segment_content_width / segments;
         const int time_gap = 1;
         const int time_height = (std::max)(1, sc(2));
         const int row_gap = (std::max)(3, sc(3));
@@ -899,13 +1109,22 @@ namespace
         const int top = y + vertical_offset + (std::max)(0, (row_height - bar_height - time_gap - time_height - row_gap) / 2);
         for (int i = 0; i < segments; ++i)
         {
-            RECT bar{ bar_x + i * (segment_width + gap), top,
-                bar_x + i * (segment_width + gap) + segment_width, top + bar_height };
+            const int cell_x = bar_x + i * (segment_width + gap);
+            RECT bar{ cell_x, top, cell_x + segment_width, top + bar_height };
             HBRUSH brush = CreateSolidBrush(empty);
             FillRect(dc, &bar, brush);
             DeleteObject(brush);
             // Each cell represents 10%. As quota is used, its colored fill recedes from top to bottom.
-            const double covered = available ? std::clamp(filled_segments - i, 0.0, 1.0) : 0.0;
+            const double recent_covered = available ? CodexRecent::Coverage(
+                (std::min)(100.0, remaining + recent), segments, i) : 0.0;
+            const int recent_height = static_cast<int>(std::lround(bar_height * recent_covered));
+            RECT recent_fill = options.bar_style == 0
+                ? RECT{bar.left, bar.bottom - recent_height, bar.right, bar.bottom}
+                : RECT{bar.left, bar.top, bar.left + static_cast<int>(std::lround(segment_width * recent_covered)), bar.bottom};
+            brush = CreateSolidBrush(recent_color);
+            FillRect(dc, &recent_fill, brush);
+            DeleteObject(brush);
+            const double covered = available ? CodexRecent::Coverage(remaining, segments, i) : 0.0;
             const int fill_height = static_cast<int>(std::lround(bar_height * covered));
             if (fill_height > 0)
             {
@@ -926,7 +1145,25 @@ namespace
             RECT time_bar{ bar_x, top + bar_height + time_gap, bar_x + static_cast<int>(std::lround(drawn_width * ratio)), top + bar_height + time_gap + time_height };
             HBRUSH work_brush = CreateSolidBrush(dark ? RGB(138, 144, 153) : RGB(107, 114, 128));
             HBRUSH rest_brush = CreateSolidBrush(dark ? RGB(110, 118, 130) : RGB(151, 160, 174));
-            const auto markers = CodexTimeBar::MarkerPixels(now, reset, weekly, drawn_width, snapshot.calendar);
+            const CodexTimeBar::Schedule schedule{ options.rest_schedule, options.morning_start, options.morning_end,
+                options.afternoon_start, options.afternoon_end };
+            const auto markers = CodexTimeBar::MarkerPixels(now, reset, weekly, drawn_width, snapshot.calendar, 0, schedule);
+            const bool expiry_enabled = options.show_expiry_warning && options.expiry_timestamp > 0;
+            const COLORREF expiry_work = dark ? RGB(151, 108, 55) : RGB(201, 145, 73);
+            const COLORREF expiry_rest = dark ? RGB(168, 139, 66) : RGB(220, 184, 91);
+            const COLORREF credit_work = dark ? RGB(105, 151, 196) : RGB(88, 151, 209);
+            const COLORREF credit_rest = dark ? RGB(142, 179, 212) : RGB(155, 194, 226);
+            HBRUSH expiry_work_brush = expiry_enabled ? CreateSolidBrush(expiry_work) : nullptr;
+            HBRUSH expiry_rest_brush = expiry_enabled ? CreateSolidBrush(expiry_rest) : nullptr;
+            HBRUSH credit_work_brush = snapshot.all_reset_credit_expiries.empty() ? nullptr : CreateSolidBrush(credit_work);
+            HBRUSH credit_rest_brush = snapshot.all_reset_credit_expiries.empty() ? nullptr : CreateSolidBrush(credit_rest);
+            long long next_credit_expiry = 0;
+            for (const long long card_expiry : snapshot.all_reset_credit_expiries)
+            {
+                if (card_expiry > now && (next_credit_expiry == 0 || card_expiry < next_credit_expiry))
+                    next_credit_expiry = card_expiry;
+            }
+            const bool credit_expiry_in_cycle = next_credit_expiry > now && next_credit_expiry <= reset;
             // Leave gaps unpainted so the host's existing background remains visible.
             for (int pixel = 0; pixel < time_bar.right - time_bar.left; ++pixel)
             {
@@ -934,32 +1171,103 @@ namespace
                 // Match the reverse time direction of the shrinking bar; sample each pixel's center.
                 const long long timestamp = (std::max)(now, reset - static_cast<long long>((pixel + 0.5) * duration / drawn_width));
                 RECT section{ bar_x + pixel, time_bar.top, bar_x + pixel + 1, time_bar.bottom };
-                FillRect(dc, &section, CodexTimeBar::IsWorkingTime(timestamp, weekly, snapshot.calendar) ? work_brush : rest_brush);
+                const bool working_time = CodexTimeBar::IsWorkingTime(timestamp, weekly, snapshot.calendar, schedule);
+                const bool after_expiry = expiry_enabled && timestamp >= options.expiry_timestamp;
+                const bool after_credit_expiry = credit_expiry_in_cycle && timestamp >= next_credit_expiry;
+                if (after_credit_expiry)
+                    FillRect(dc, &section, working_time ? credit_work_brush : credit_rest_brush);
+                else if (after_expiry)
+                    FillRect(dc, &section, working_time ? expiry_work_brush : expiry_rest_brush);
+                else FillRect(dc, &section, working_time ? work_brush : rest_brush);
             }
+            if (expiry_work_brush) DeleteObject(expiry_work_brush);
+            if (expiry_rest_brush) DeleteObject(expiry_rest_brush);
+            if (credit_work_brush) DeleteObject(credit_work_brush);
+            if (credit_rest_brush) DeleteObject(credit_rest_brush);
             DeleteObject(work_brush);
             DeleteObject(rest_brush);
         }
         const int value_x = bar_x + drawn_width + sc(8);
         const std::wstring summary = QuotaSummary(snapshot, weekly);
         SIZE size{}; GetTextExtentPoint32W(dc, summary.c_str(), static_cast<int>(summary.size()), &size);
-        RECT summary_rect{ value_x, y, value_x + size.cx + sc(1), y + row_height };
-        DrawText(dc, summary_rect, summary, foreground);
         const std::wstring other_summary = options.show_session && options.show_weekly ? QuotaSummary(snapshot, !weekly) : summary;
         SIZE other_size{}; GetTextExtentPoint32W(dc, other_summary.c_str(), static_cast<int>(other_summary.size()), &other_size);
+        RECT summary_rect{ value_x, y, value_x + size.cx + sc(1), y + row_height };
+        RECT histogram_rect{ summary_rect.left, summary_rect.top + sc(1),
+            value_x + (std::max)(size.cx, other_size.cx) + sc(1), summary_rect.bottom - sc(1) };
+        DrawMinuteHistogram(dc, histogram_rect,
+            weekly ? snapshot.weekly_minute_buckets : snapshot.session_minute_buckets,
+            weekly ? 15 : 1, RGB(194, 202, 211));
+        DrawText(dc, summary_rect, summary, foreground);
         const int badge_x = value_x + (std::max)(size.cx, other_size.cx) + sc(6);
         const int count = options.show_cards ? (std::min)(8, (std::max)(0, snapshot.reset_credits)) : 0;
         const bool double_row = options.show_session && options.show_weekly;
+        HFONT measure_font = CreateFontW(-sc(8), 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+        HGDIOBJ old_measure_font = SelectObject(dc, measure_font);
+        SIZE widest_badge_text{};
+        GetTextExtentPoint32W(dc, L"88h", 3, &widest_badge_text);
+        SelectObject(dc, old_measure_font);
+        DeleteObject(measure_font);
+        const int card_width = (std::max)(sc(14), static_cast<int>(widest_badge_text.cx) + sc(2));
         for (int i = double_row && weekly ? 1 : 0; i < count; i += double_row ? 2 : 1)
         {
             const int card_size = (std::max)(10, (std::min)(sc(14), row_height - sc(3)));
-            const int bx = badge_x + (double_row ? i / 2 : i) * sc(kResetCardColumnPitch);
-            if (bx + card_size > x + w) break;
-            RECT badge{ bx, y + (row_height - card_size) / 2, bx + card_size, y + (row_height - card_size) / 2 + card_size };
+            const int bx = badge_x + (double_row ? i / 2 : i) * (card_width + sc(2));
+            if (bx + card_width > x + w) break;
+            RECT badge{ bx, y + (row_height - card_size) / 2, bx + card_width, y + (row_height - card_size) / 2 + card_size };
             const long long expiry = static_cast<size_t>(i) < snapshot.reset_credit_expiries.size() ? snapshot.reset_credit_expiries[i] : 0;
             const long long seconds = expiry - static_cast<long long>(time(nullptr));
-            const COLORREF color = expiry > 0 && seconds < 3600 ? RGB(198, 40, 40) : expiry > 0 && seconds < 86400 ? RGB(196, 95, 0) : foreground;
-            HBRUSH border = CreateSolidBrush(color);
-            FrameRect(dc, &badge, border);
+            COLORREF color = foreground;
+            COLORREF fill_color = RGB(194, 202, 211);
+            if (expiry > 0)
+            {
+                if (seconds < 3600)
+                {
+                    color = RGB(198, 40, 40);
+                    fill_color = RGB(250, 225, 224);
+                }
+                else if (seconds < 86400)
+                {
+                    color = RGB(155, 108, 0);
+                    fill_color = RGB(255, 243, 191);
+                }
+                else if (seconds < 7LL * 86400)
+                {
+                    color = dark ? RGB(74, 128, 184) : RGB(35, 87, 143);
+                    fill_color = dark ? RGB(177, 202, 230) : RGB(190, 213, 237);
+                }
+            }
+            const int right = badge.right - 1;
+            const int bottom = badge.bottom - 1;
+            const int bevel = (std::max)(1, (std::min)(sc(3), card_size / 3));
+            const POINT outline[] = {
+                { badge.left, badge.top }, { right - bevel, badge.top }, { right, badge.top + bevel },
+                { right, bottom }, { badge.left, bottom }, { badge.left, badge.top }
+            };
+            constexpr int left_top_inset = 2; // one pixel for the outline and one for the visible gap
+            const int inner_right = right - 1;
+            const int inner_bottom = bottom - 1;
+            const int inner_bevel = (std::max)(1, bevel - left_top_inset);
+            const POINT inner_fill[] = {
+                { badge.left + left_top_inset, badge.top + left_top_inset },
+                { inner_right - inner_bevel, badge.top + left_top_inset },
+                { inner_right, badge.top + left_top_inset + inner_bevel },
+                { inner_right, inner_bottom },
+                { badge.left + left_top_inset, inner_bottom },
+                { badge.left + left_top_inset, badge.top + left_top_inset }
+            };
+            HRGN fill_region = CreatePolygonRgn(inner_fill, static_cast<int>(std::size(inner_fill)), WINDING);
+            HBRUSH fill_brush = CreateSolidBrush(fill_color);
+            if (fill_region && fill_brush) FillRgn(dc, fill_region, fill_brush);
+            if (fill_region) DeleteObject(fill_region);
+            if (fill_brush) DeleteObject(fill_brush);
+            // Keep the tiny badge outline crisp on high-DPI displays. Its geometry and text scale;
+            // the outline stays one device pixel so it cannot round up to a visibly heavy 2px line.
+            HPEN border = CreatePen(PS_SOLID, 1, color);
+            HGDIOBJ old_pen = SelectObject(dc, border);
+            Polyline(dc, outline, 6);
+            SelectObject(dc, old_pen);
             DeleteObject(border);
             const std::wstring text = ResetBadge(expiry);
             HFONT font = CreateFontW(-sc(text.size() > 2 ? 8 : 9), 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE,
@@ -968,36 +1276,8 @@ namespace
             const int saved_dc = SaveDC(dc);
             SetTextColor(dc, color);
             SetBkMode(dc, TRANSPARENT);
-            // Center the visible glyphs, excluding the font's leading and side bearings.
-            MAT2 identity{ { 0, 1 }, { 0, 0 }, { 0, 0 }, { 0, 1 } };
-            RECT ink{};
-            int advance = 0;
-            bool measured = true;
-            bool first_glyph = true;
-            for (wchar_t character : text)
-            {
-                GLYPHMETRICS glyph{};
-                if (GetGlyphOutlineW(dc, character, GGO_METRICS, &glyph, 0, nullptr, &identity) == GDI_ERROR)
-                {
-                    measured = false;
-                    break;
-                }
-                RECT bounds{ advance + glyph.gmptGlyphOrigin.x, -glyph.gmptGlyphOrigin.y,
-                    advance + glyph.gmptGlyphOrigin.x + static_cast<int>(glyph.gmBlackBoxX),
-                    -glyph.gmptGlyphOrigin.y + static_cast<int>(glyph.gmBlackBoxY) };
-                if (first_glyph) { ink = bounds; first_glyph = false; }
-                else { UnionRect(&ink, &ink, &bounds); }
-                advance += glyph.gmCellIncX;
-            }
-            if (measured && !first_glyph)
-            {
-                SetTextAlign(dc, TA_LEFT | TA_BASELINE | TA_NOUPDATECP);
-                TextOutW(dc, (badge.left + badge.right - ink.left - ink.right) / 2,
-                    (badge.top + badge.bottom - ink.top - ink.bottom) / 2,
-                    text.c_str(), static_cast<int>(text.size()));
-            }
-            else
-                ::DrawTextW(dc, text.c_str(), static_cast<int>(text.size()), &badge, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            ::DrawTextW(dc, text.c_str(), static_cast<int>(text.size()), &badge,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             RestoreDC(dc, saved_dc);
             SelectObject(dc, old); DeleteObject(font);
         }
@@ -1047,15 +1327,38 @@ void CCodexUsagePlugin::OnInitialize(ITrafficMonitor* app)
         m_config_path = (std::filesystem::path(app->GetPluginConfigDir()) / L"CodexUsage.ini").wstring();
         auto read = [&](const wchar_t* key, int fallback) { return static_cast<int>(GetPrivateProfileIntW(L"Options", key, fallback, m_config_path.c_str())); };
         CodexOptions options;
-        options.poll_seconds = read(L"PollSeconds", 60);
-        if (options.poll_seconds != 60 && options.poll_seconds != 300 && options.poll_seconds != 900 && options.poll_seconds != 3600) options.poll_seconds = 60;
+        options.poll_seconds = 60;
         options.theme = (std::clamp)(read(L"Theme", 0), 0, 2);
         options.bar_style = (std::clamp)(read(L"BarStyle", 0), 0, 1);
         options.text_style = (std::clamp)(read(L"TextStyle", 0), 0, 1);
         options.show_session = read(L"ShowSession", 1) != 0;
         options.show_weekly = read(L"ShowWeekly", 1) != 0;
+        const int saved_weekly_mode = read(L"WeeklyBarMode", -1);
+        options.weekly_bar_mode = saved_weekly_mode >= 0
+            ? (std::clamp)(saved_weekly_mode, 0, 3)
+            : (read(L"Weekly7Cells", 0) != 0 ? 1 : (read(L"Weekly14Cells", 0) != 0 ? 2 : 0));
         options.show_cards = read(L"ShowCards", 1) != 0;
         options.show_time_bar = read(L"ShowTimeBar", 1) != 0;
+        options.show_expiry_warning = read(L"ShowExpiryWarning", 0) != 0;
+        wchar_t expiry_value[64]{};
+        GetPrivateProfileStringW(L"Options", L"ExpiryTimestamp", L"0", expiry_value,
+            static_cast<DWORD>(std::size(expiry_value)), m_config_path.c_str());
+        options.expiry_timestamp = _wtoi64(expiry_value);
+        if (options.expiry_timestamp < 0) options.expiry_timestamp = 0;
+        options.rest_schedule = (std::clamp)(read(L"RestSchedule", 0), 0, 3);
+        const auto valid_minute = [](int minute) { return minute >= 0 && minute < 24 * 60; };
+        options.morning_start = read(L"MorningStart", 9 * 60 + 30);
+        options.morning_end = read(L"MorningEnd", 12 * 60);
+        options.afternoon_start = read(L"AfternoonStart", 13 * 60 + 30);
+        options.afternoon_end = read(L"AfternoonEnd", 18 * 60 + 30);
+        if (!valid_minute(options.morning_start) || !valid_minute(options.morning_end) ||
+            !valid_minute(options.afternoon_start) || !valid_minute(options.afternoon_end) ||
+            options.morning_start >= options.morning_end || options.morning_end > options.afternoon_start ||
+            options.afternoon_start >= options.afternoon_end)
+        {
+            options.morning_start = 9 * 60 + 30; options.morning_end = 12 * 60;
+            options.afternoon_start = 13 * 60 + 30; options.afternoon_end = 18 * 60 + 30;
+        }
         if (!options.show_session && !options.show_weekly) options.show_session = true;
         std::lock_guard<std::mutex> lock(m_options_mutex);
         m_options = options;
@@ -1078,9 +1381,10 @@ void CCodexUsagePlugin::PollLoop()
 {
     while (!m_stop.load())
     {
+        const auto next_poll = std::chrono::steady_clock::now() + std::chrono::seconds(60);
         RefreshSnapshot();
         std::unique_lock<std::mutex> lock(m_worker_mutex);
-        m_worker_cv.wait_for(lock, std::chrono::seconds(Options().poll_seconds), [this] {
+        m_worker_cv.wait_until(lock, next_poll, [this] {
             return m_stop.load() || m_refresh_requested.exchange(false);
         });
         if (m_stop.load()) break;
@@ -1090,6 +1394,7 @@ void CCodexUsagePlugin::PollLoop()
 void CCodexUsagePlugin::RefreshSnapshot()
 {
     CodexSnapshot next;
+    bool usage_ok = false, credits_ok = false;
     // Load beside this DLL, independently of the host's current working directory.
     // The worker refreshes the calendar; painting only reads the cached snapshot.
     HMODULE module{};
@@ -1110,27 +1415,74 @@ void CCodexUsagePlugin::RefreshSnapshot()
         }
     }
     Credentials credentials;
+    const long long sampled_at = static_cast<long long>(time(nullptr));
+    const auto history_path = m_config_path.empty() ? std::filesystem::path{}
+        : std::filesystem::path(m_config_path).parent_path() / L"CodexUsage.history";
     if (!ReadCredentials(credentials))
     {
         next.status = m_is_chinese ? L"未找到 Codex 登录凭据" : L"Codex sign-in credentials not found";
     }
     else
     {
+        // Store an account discriminator, never authentication tokens or raw credentials.
+        unsigned long long account_hash = 14695981039346656037ULL;
+        for (wchar_t ch : credentials.account_id)
+        { account_hash ^= static_cast<unsigned long long>(ch); account_hash *= 1099511628211ULL; }
+        const std::string account = std::to_string(account_hash);
+        if (m_history_account != account)
+        {
+            m_history_account = account;
+            m_session_history = {}; m_weekly_history = {};
+            m_remote_cache = {};
+            if (!history_path.empty())
+            {
+                std::ifstream saved(history_path);
+                std::string version, saved_account;
+                CodexRecent::Window session, weekly;
+                if ((saved >> version >> saved_account) && saved_account == account)
+                {
+                    const bool loaded = version == "v2" ? session.Read(saved) && weekly.Read(saved)
+                        : version == "v1" && session.ReadLegacy(saved, 5 * 3600) && weekly.ReadLegacy(saved, 7 * 86400);
+                    if (loaded) { m_session_history = session; m_weekly_history = weekly; }
+                }
+            }
+        }
         std::wstring body;
         JsonValue root;
         if (HttpGet(kUsagePath, credentials, body) && ParseJson(body, root))
         {
             ParseUsage(root, next, m_is_chinese);
+            usage_ok = next.has_session || next.has_weekly;
+            if (next.has_session) m_session_history.Record(sampled_at, next.session_used, next.session_reset, 5 * 3600);
+            if (next.has_weekly) m_weekly_history.Record(sampled_at, next.weekly_used, next.weekly_reset, 7 * 86400);
+            m_session_history.Prune(sampled_at);
+            m_weekly_history.Prune(sampled_at);
+            if (usage_ok && !history_path.empty())
+            {
+                std::error_code error;
+                std::filesystem::create_directories(history_path.parent_path(), error);
+                const auto temporary = std::filesystem::path(history_path.wstring() + L".tmp");
+                std::ofstream saved(temporary, std::ios::trunc);
+                saved << "v2 " << m_history_account << '\n' << std::setprecision(17);
+                m_session_history.Write(saved); m_weekly_history.Write(saved);
+                saved.flush();
+                const bool written = static_cast<bool>(saved);
+                saved.close();
+                if (written) MoveFileExW(temporary.c_str(), history_path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+            }
             next.status = (next.has_session || next.has_weekly) ? (m_is_chinese ? L"已连接" : L"Connected")
                 : (m_is_chinese ? L"账号未返回额度数据" : L"No quota data returned");
             std::wstring credit_body;
             JsonValue credit_root;
             if (HttpGet(kCreditsPath, credentials, credit_body) && ParseJson(credit_body, credit_root))
             {
+                // A parsed error object is not a successful credit response.
                 const JsonValue* count = credit_root.Get(L"available_count");
                 if (count && count->type == JsonValue::Type::Number)
                     next.reset_credits = static_cast<int>(count->number);
                 const JsonValue* credit_items = credit_root.Get(L"credits");
+                credits_ok = (count && count->type == JsonValue::Type::Number)
+                    || (credit_items && credit_items->type == JsonValue::Type::Array);
                 if (credit_items && credit_items->type == JsonValue::Type::Array)
                 {
                     std::wostringstream details;
@@ -1141,14 +1493,21 @@ void CCodexUsagePlugin::RefreshSnapshot()
                         const JsonValue* status = item.Get(L"status");
                         if (status && status->String() != L"available") continue;
                         const JsonValue* expires = item.Get(L"expires_at");
-                        next.reset_credit_expiries.push_back(CreditExpiry(expires));
-                        details << L"  " << (expires ? expires->String(m_is_chinese ? L"未知" : L"expiry unknown") : (m_is_chinese ? L"未知" : L"expiry unknown")) << L"\r\n";
-                        if (++shown >= 8) break;
+                        const long long expiry = CreditExpiry(expires);
+                        next.all_reset_credit_expiries.push_back(expiry);
+                        if (shown < 8)
+                        {
+                            next.reset_credit_expiries.push_back(expiry);
+                            details << L"  " << (expires ? expires->String(m_is_chinese ? L"未知" : L"expiry unknown") : (m_is_chinese ? L"未知" : L"expiry unknown")) << L"\r\n";
+                            ++shown;
+                        }
                     }
                     next.account_details = details.str();
-                    std::sort(next.reset_credit_expiries.begin(), next.reset_credit_expiries.end(), [](long long a, long long b) {
+                    const auto by_expiry = [](long long a, long long b) {
                         return a != 0 && (b == 0 || a < b);
-                    });
+                    };
+                    std::sort(next.reset_credit_expiries.begin(), next.reset_credit_expiries.end(), by_expiry);
+                    std::sort(next.all_reset_credit_expiries.begin(), next.all_reset_credit_expiries.end(), by_expiry);
                 }
             }
         }
@@ -1160,6 +1519,23 @@ void CCodexUsagePlugin::RefreshSnapshot()
             SecureZeroMemory(credentials.access_token.data(), credentials.access_token.size() * sizeof(wchar_t));
     }
 
+    const auto options = Options();
+    next.remote_unavailable = !usage_ok || !credits_ok
+        || (options.show_session && !next.has_session) || (options.show_weekly && !next.has_weekly);
+    const bool using_cache = RestoreCachedRemote(next, m_remote_cache, usage_ok, credits_ok);
+    if (next.remote_unavailable)
+    {
+        if (usage_ok) next.status = m_is_chinese ? L"部分 Codex 信息获取失败" : L"Some Codex information unavailable";
+        if (using_cache) next.status += m_is_chinese ? L"（显示上次缓存）" : L" (showing cached values)";
+    }
+    // Retention also runs on failed requests; it never creates quota samples.
+    m_session_history.Prune(sampled_at);
+    m_weekly_history.Prune(sampled_at);
+    next.session_recent = m_session_history.Recent(sampled_at, 3600);
+    next.weekly_recent = m_weekly_history.Recent(sampled_at, 86400);
+    next.session_minute_buckets = m_session_history.RecentBuckets(sampled_at, 5 * 3600);
+    next.weekly_minute_buckets = m_weekly_history.RecentBuckets(sampled_at, 7 * 86400);
+    m_remote_cache = next;
     ScanSessions(next);
     std::wostringstream details;
     if (m_is_chinese)
@@ -1266,10 +1642,85 @@ namespace
         add(L"TextStyle", options.text_style);
         add(L"ShowSession", options.show_session);
         add(L"ShowWeekly", options.show_weekly);
+        add(L"WeeklyBarMode", options.weekly_bar_mode);
         add(L"ShowCards", options.show_cards);
         add(L"ShowTimeBar", options.show_time_bar);
+        add(L"ShowExpiryWarning", options.show_expiry_warning);
+        section += L"ExpiryTimestamp=" + std::to_wstring(options.expiry_timestamp);
+        section.push_back(L'\0');
+        add(L"RestSchedule", options.rest_schedule);
+        add(L"MorningStart", options.morning_start);
+        add(L"MorningEnd", options.morning_end);
+        add(L"AfternoonStart", options.afternoon_start);
+        add(L"AfternoonEnd", options.afternoon_end);
         section.push_back(L'\0');
         return section;
+    }
+
+    std::wstring FormatClock(int minute)
+    {
+        wchar_t text[6]{};
+        swprintf_s(text, L"%02d:%02d", minute / 60, minute % 60);
+        return text;
+    }
+
+    bool ParseClock(HWND dialog, int id, int& minute)
+    {
+        wchar_t text[16]{};
+        GetDlgItemTextW(dialog, id, text, static_cast<int>(std::size(text)));
+        if (wcslen(text) != 5 || text[2] != L':') return false;
+        for (int i : {0, 1, 3, 4}) if (text[i] < L'0' || text[i] > L'9') return false;
+        const int hour = (text[0] - L'0') * 10 + text[1] - L'0';
+        const int mins = (text[3] - L'0') * 10 + text[4] - L'0';
+        if (hour > 23 || mins > 59) return false;
+        minute = hour * 60 + mins;
+        return true;
+    }
+
+    std::wstring FormatLocalDateTime(long long timestamp)
+    {
+        if (timestamp <= 0) return {};
+        const std::time_t value = static_cast<std::time_t>(timestamp);
+        std::tm local{};
+        if (localtime_s(&local, &value) != 0) return {};
+        wchar_t text[20]{};
+        swprintf_s(text, L"%04d-%02d-%02d %02d:%02d:%02d", local.tm_year + 1900,
+            local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min, local.tm_sec);
+        return text;
+    }
+
+    bool ParseLocalDateTime(HWND dialog, int id, long long& timestamp)
+    {
+        wchar_t text[32]{};
+        GetDlgItemTextW(dialog, id, text, static_cast<int>(std::size(text)));
+        if (wcslen(text) != 19 || text[4] != L'-' || text[7] != L'-' || text[10] != L' ' ||
+            text[13] != L':' || text[16] != L':') return false;
+        for (int i = 0; i < 19; ++i)
+            if (i != 4 && i != 7 && i != 10 && i != 13 && i != 16 && (text[i] < L'0' || text[i] > L'9')) return false;
+        const auto number = [&](int start, int count) {
+            int value = 0;
+            for (int i = start; i < start + count; ++i) value = value * 10 + text[i] - L'0';
+            return value;
+        };
+        std::tm local{};
+        local.tm_year = number(0, 4) - 1900;
+        local.tm_mon = number(5, 2) - 1;
+        local.tm_mday = number(8, 2);
+        local.tm_hour = number(11, 2);
+        local.tm_min = number(14, 2);
+        local.tm_sec = number(17, 2);
+        if (local.tm_year < 70 || local.tm_mon < 0 || local.tm_mon > 11 || local.tm_mday < 1 || local.tm_mday > 31 ||
+            local.tm_hour > 23 || local.tm_min > 59 || local.tm_sec > 59) return false;
+        local.tm_isdst = -1;
+        const __time64_t parsed = _mktime64(&local);
+        if (parsed < 0) return false;
+        std::tm roundtrip{};
+        const std::time_t value = static_cast<std::time_t>(parsed);
+        if (localtime_s(&roundtrip, &value) != 0 || roundtrip.tm_year != number(0, 4) - 1900 ||
+            roundtrip.tm_mon != number(5, 2) - 1 || roundtrip.tm_mday != number(8, 2) ||
+            roundtrip.tm_hour != number(11, 2) || roundtrip.tm_min != number(14, 2) || roundtrip.tm_sec != number(17, 2)) return false;
+        timestamp = static_cast<long long>(parsed);
+        return true;
     }
 
     INT_PTR CALLBACK OptionsDialogProc(HWND dialog, UINT message, WPARAM wp, LPARAM)
@@ -1282,53 +1733,142 @@ namespace
                 for (const auto label : labels) SendDlgItemMessageW(dialog, id, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
                 SendDlgItemMessageW(dialog, id, CB_SETCURSEL, selected, 0);
             };
-            combo(IDC_POLL, chinese ? std::initializer_list<const wchar_t*>{L"1 分钟", L"5 分钟", L"15 分钟", L"1 小时"}
-                : std::initializer_list<const wchar_t*>{L"1 minute", L"5 minutes", L"15 minutes", L"1 hour"},
-                options.poll_seconds == 300 ? 1 : options.poll_seconds == 900 ? 2 : options.poll_seconds == 3600 ? 3 : 0);
+            combo(IDC_POLL, chinese ? std::initializer_list<const wchar_t*>{L"1 分钟（固定）"}
+                : std::initializer_list<const wchar_t*>{L"1 minute (fixed)"}, 0);
+            EnableWindow(GetDlgItem(dialog, IDC_POLL), FALSE);
             combo(IDC_THEME, chinese ? std::initializer_list<const wchar_t*>{L"跟随 TrafficMonitor", L"浅色", L"深色"}
                 : std::initializer_list<const wchar_t*>{L"Follow TrafficMonitor", L"Light", L"Dark"}, options.theme);
             combo(IDC_BAR, chinese ? std::initializer_list<const wchar_t*>{L"分段", L"连续"}
                 : std::initializer_list<const wchar_t*>{L"Segmented", L"Continuous"}, options.bar_style);
             combo(IDC_TEXT, chinese ? std::initializer_list<const wchar_t*>{L"简洁", L"详细"}
                 : std::initializer_list<const wchar_t*>{L"Compact", L"Detailed"}, options.text_style);
+            combo(IDC_REST_SCHEDULE, chinese
+                ? std::initializer_list<const wchar_t*>{L"双休（周六、周日休）", L"单休（周日休）", L"单双轮休 A（A 周双休）", L"单双轮休 B（B 周双休）"}
+                : std::initializer_list<const wchar_t*>{L"Two days off (Sat/Sun)", L"One day off (Sun)", L"Alternating A (A week: Sat/Sun off)", L"Alternating B (B week: Sat/Sun off)"}, options.rest_schedule);
+            SetDlgItemTextW(dialog, IDC_MORNING_START, FormatClock(options.morning_start).c_str());
+            SetDlgItemTextW(dialog, IDC_MORNING_END, FormatClock(options.morning_end).c_str());
+            SetDlgItemTextW(dialog, IDC_AFTERNOON_START, FormatClock(options.afternoon_start).c_str());
+            SetDlgItemTextW(dialog, IDC_AFTERNOON_END, FormatClock(options.afternoon_end).c_str());
+            SetDlgItemTextW(dialog, IDC_EXPIRY_TIME, FormatLocalDateTime(options.expiry_timestamp).c_str());
+            SendDlgItemMessageW(dialog, IDC_EXPIRY_TIME, EM_SETCUEBANNER, TRUE,
+                reinterpret_cast<LPARAM>(chinese ? L"YYYY-MM-DD HH:mm:ss（本地时间）" : L"YYYY-MM-DD HH:mm:ss (local time)"));
             CheckDlgButton(dialog, IDC_SESSION, options.show_session ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(dialog, IDC_WEEKLY, options.show_weekly ? BST_CHECKED : BST_UNCHECKED);
+            combo(IDC_WEEKLY_BAR_MODE, chinese
+                ? std::initializer_list<const wchar_t*>{L"10 格（默认）", L"7 格（每天 1 格）", L"14 格（紧凑）", L"14 格（宽松）"}
+                : std::initializer_list<const wchar_t*>{L"10 cells (default)", L"7 cells (1/day)", L"14 cells (compact)", L"14 cells (spacious)"}, options.weekly_bar_mode);
             CheckDlgButton(dialog, IDC_CARDS, options.show_cards ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(dialog, IDC_TIME_BAR, options.show_time_bar ? BST_CHECKED : BST_UNCHECKED);
+            CheckDlgButton(dialog, IDC_EXPIRY_WARNING, options.show_expiry_warning ? BST_CHECKED : BST_UNCHECKED);
+            EnableWindow(GetDlgItem(dialog, IDC_EXPIRY_WARNING), options.show_time_bar);
+            EnableWindow(GetDlgItem(dialog, IDC_EXPIRY_TIME), options.show_time_bar && options.show_expiry_warning);
+            EnableWindow(GetDlgItem(dialog, IDC_WEEKLY_BAR_MODE),
+                options.show_weekly && options.bar_style == 0);
             if (chinese)
             {
                 SetWindowTextW(dialog, L"Codex Usage 插件选项");
                 const std::pair<int, const wchar_t*> labels[] = {
                     {IDC_POLL_LABEL, L"刷新频率"}, {IDC_THEME_LABEL, L"主题"}, {IDC_BAR_LABEL, L"额度进度条"},
                     {IDC_TEXT_LABEL, L"文字样式"}, {IDC_SESSION, L"显示 5 小时额度"}, {IDC_WEEKLY, L"显示 7 天额度"},
+                    {IDC_WEEKLY_BAR_LABEL, L"7 天进度条"},
                     {IDC_CARDS, L"显示重置卡片"}, {IDC_TIME_BAR, L"显示时间进度条"},
+                    {IDC_EXPIRY_WARNING, L"启用过期提示"},
+                    {IDC_SCHEDULE_LABEL, L"每周休息安排"}, {IDC_MORNING_LABEL, L"上午时段"},
+                    {IDC_AFTERNOON_LABEL, L"下午时段"}, {IDC_MORNING_TO, L"至"}, {IDC_AFTERNOON_TO, L"至"},
                     {IDC_HINT, L"窗口位置和背景由 TrafficMonitor 控制。至少保留一个额度窗口。"},
                     {IDOK, L"确定"}, {IDCANCEL, L"取消"}
                 };
                 for (const auto& label : labels) SetDlgItemTextW(dialog, label.first, label.second);
             }
-            RECT bounds{}, owner{};
+            const bool time_bar_enabled = options.show_time_bar;
+            for (int id : { IDC_SCHEDULE_LABEL, IDC_REST_SCHEDULE, IDC_MORNING_LABEL, IDC_MORNING_START,
+                IDC_MORNING_TO, IDC_MORNING_END, IDC_AFTERNOON_LABEL, IDC_AFTERNOON_START, IDC_AFTERNOON_TO, IDC_AFTERNOON_END })
+                EnableWindow(GetDlgItem(dialog, id), time_bar_enabled);
+            RECT bounds{}, work_area{};
             GetWindowRect(dialog, &bounds);
-            GetWindowRect(GetParent(dialog) ? GetParent(dialog) : GetDesktopWindow(), &owner);
-            SetWindowPos(dialog, nullptr, owner.left + (owner.right - owner.left - bounds.right + bounds.left) / 2,
-                owner.top + (owner.bottom - owner.top - bounds.bottom + bounds.top) / 2, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+            const HWND owner = GetParent(dialog);
+            const HMONITOR monitor = MonitorFromWindow(owner ? owner : dialog, MONITOR_DEFAULTTONEAREST);
+            MONITORINFO monitor_info{ sizeof(monitor_info) };
+            if (monitor && GetMonitorInfoW(monitor, &monitor_info))
+                work_area = monitor_info.rcWork;
+            else if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &work_area, 0))
+                work_area = RECT{ 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN) };
+
+            const LONG dialog_width = bounds.right - bounds.left;
+            const LONG dialog_height = bounds.bottom - bounds.top;
+            const LONG max_left = (std::max)(work_area.left, work_area.right - dialog_width);
+            const LONG max_top = (std::max)(work_area.top, work_area.bottom - dialog_height);
+            const LONG left = (std::clamp)(work_area.left + (work_area.right - work_area.left - dialog_width) / 2,
+                work_area.left, max_left);
+            const LONG top = (std::clamp)(work_area.top + (work_area.bottom - work_area.top - dialog_height) / 2,
+                work_area.top, max_top);
+            SetWindowPos(dialog, nullptr, left, top, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
             return TRUE;
         }
         if (message == WM_COMMAND)
         {
+            if ((LOWORD(wp) == IDC_WEEKLY && HIWORD(wp) == BN_CLICKED) ||
+                (LOWORD(wp) == IDC_BAR && HIWORD(wp) == CBN_SELCHANGE))
+            {
+                const bool show_weekly = IsDlgButtonChecked(dialog, IDC_WEEKLY) == BST_CHECKED;
+                const int bar_style = static_cast<int>(SendDlgItemMessageW(dialog, IDC_BAR, CB_GETCURSEL, 0, 0));
+                EnableWindow(GetDlgItem(dialog, IDC_WEEKLY_BAR_MODE), show_weekly && bar_style == 0);
+                return TRUE;
+            }
+            if (LOWORD(wp) == IDC_TIME_BAR && HIWORD(wp) == BN_CLICKED)
+            {
+                const bool enabled = IsDlgButtonChecked(dialog, IDC_TIME_BAR) == BST_CHECKED;
+                for (int id : { IDC_SCHEDULE_LABEL, IDC_REST_SCHEDULE, IDC_MORNING_LABEL, IDC_MORNING_START,
+                    IDC_MORNING_TO, IDC_MORNING_END, IDC_AFTERNOON_LABEL, IDC_AFTERNOON_START, IDC_AFTERNOON_TO, IDC_AFTERNOON_END })
+                    EnableWindow(GetDlgItem(dialog, id), enabled);
+                const bool expiry_enabled = IsDlgButtonChecked(dialog, IDC_EXPIRY_WARNING) == BST_CHECKED;
+                EnableWindow(GetDlgItem(dialog, IDC_EXPIRY_WARNING), enabled);
+                EnableWindow(GetDlgItem(dialog, IDC_EXPIRY_TIME), enabled && expiry_enabled);
+                return TRUE;
+            }
+            if (LOWORD(wp) == IDC_EXPIRY_WARNING && HIWORD(wp) == BN_CLICKED)
+            {
+                const bool enabled = IsDlgButtonChecked(dialog, IDC_TIME_BAR) == BST_CHECKED &&
+                    IsDlgButtonChecked(dialog, IDC_EXPIRY_WARNING) == BST_CHECKED;
+                EnableWindow(GetDlgItem(dialog, IDC_EXPIRY_TIME), enabled);
+                return TRUE;
+            }
             if (LOWORD(wp) == IDCANCEL) { EndDialog(dialog, IDCANCEL); return TRUE; }
             if (LOWORD(wp) == IDOK)
             {
                 auto options = CCodexUsagePlugin::Instance().Options();
-                const int intervals[] = {60, 300, 900, 3600};
-                options.poll_seconds = intervals[(std::clamp)(static_cast<int>(SendDlgItemMessageW(dialog, IDC_POLL, CB_GETCURSEL, 0, 0)), 0, 3)];
+                options.poll_seconds = 60;
                 options.theme = static_cast<int>(SendDlgItemMessageW(dialog, IDC_THEME, CB_GETCURSEL, 0, 0));
                 options.bar_style = static_cast<int>(SendDlgItemMessageW(dialog, IDC_BAR, CB_GETCURSEL, 0, 0));
                 options.text_style = static_cast<int>(SendDlgItemMessageW(dialog, IDC_TEXT, CB_GETCURSEL, 0, 0));
                 options.show_session = IsDlgButtonChecked(dialog, IDC_SESSION) == BST_CHECKED;
                 options.show_weekly = IsDlgButtonChecked(dialog, IDC_WEEKLY) == BST_CHECKED;
+                options.weekly_bar_mode = static_cast<int>(SendDlgItemMessageW(dialog, IDC_WEEKLY_BAR_MODE, CB_GETCURSEL, 0, 0));
+                if (options.weekly_bar_mode < 0 || options.weekly_bar_mode > 3) options.weekly_bar_mode = 0;
                 options.show_cards = IsDlgButtonChecked(dialog, IDC_CARDS) == BST_CHECKED;
                 options.show_time_bar = IsDlgButtonChecked(dialog, IDC_TIME_BAR) == BST_CHECKED;
+                options.show_expiry_warning = IsDlgButtonChecked(dialog, IDC_EXPIRY_WARNING) == BST_CHECKED;
+                if (options.show_expiry_warning && !ParseLocalDateTime(dialog, IDC_EXPIRY_TIME, options.expiry_timestamp))
+                {
+                    MessageBoxW(dialog, chinese ? L"请输入有效时间，格式为 YYYY-MM-DD HH:mm:ss（本地时间）。" : L"Enter a valid local time in YYYY-MM-DD HH:mm:ss format.", L"Codex Usage", MB_OK | MB_ICONINFORMATION);
+                    return TRUE;
+                }
+                options.rest_schedule = static_cast<int>(SendDlgItemMessageW(dialog, IDC_REST_SCHEDULE, CB_GETCURSEL, 0, 0));
+                if (options.rest_schedule < 0 || options.rest_schedule > 3 ||
+                    !ParseClock(dialog, IDC_MORNING_START, options.morning_start) ||
+                    !ParseClock(dialog, IDC_MORNING_END, options.morning_end) ||
+                    !ParseClock(dialog, IDC_AFTERNOON_START, options.afternoon_start) ||
+                    !ParseClock(dialog, IDC_AFTERNOON_END, options.afternoon_end))
+                {
+                    MessageBoxW(dialog, chinese ? L"请输入有效时间，格式为 HH:mm。" : L"Enter valid times in HH:mm format.", L"Codex Usage", MB_OK | MB_ICONINFORMATION);
+                    return TRUE;
+                }
+                if (options.morning_start >= options.morning_end || options.morning_end > options.afternoon_start ||
+                    options.afternoon_start >= options.afternoon_end)
+                {
+                    MessageBoxW(dialog, chinese ? L"请确保上午开始 < 上午结束 ≤ 下午开始 < 下午结束。" : L"Times must satisfy morning start < morning end ≤ afternoon start < afternoon end.", L"Codex Usage", MB_OK | MB_ICONINFORMATION);
+                    return TRUE;
+                }
                 if (!options.show_session && !options.show_weekly)
                 {
                     MessageBoxW(dialog, chinese ? L"请至少选择一个额度窗口。" : L"Select at least one quota window.", L"Codex Usage", MB_OK | MB_ICONINFORMATION);
@@ -1389,8 +1929,7 @@ int CCodexUsageItem::GetItemWidthEx(void* hDC) const
 {
     if (!hDC) return 0;
     HDC dc = static_cast<HDC>(hDC);
-    TEXTMETRICW metrics{}; GetTextMetricsW(dc, &metrics);
-    const auto sc = [&](int n) { return MulDiv(n, (std::max)(16L, metrics.tmHeight), 16); };
+    const auto sc = [&](int n) { return ScaleForDpi(dc, n); };
     const auto snapshot = CCodexUsagePlugin::Instance().Snapshot();
     const auto options = CCodexUsagePlugin::Instance().Options();
     int summary_width = 0;
@@ -1403,10 +1942,18 @@ int CCodexUsageItem::GetItemWidthEx(void* hDC) const
     }
     const int cards = options.show_cards ? (std::min)(8, (std::max)(0, snapshot.reset_credits)) : 0;
     const int columns = options.show_session && options.show_weekly ? (cards + 1) / 2 : cards;
+    const int session_gap = options.weekly_bar_mode >= 2 ? 1 : (std::max)(1, sc(1));
+    const int weekly_gap = options.weekly_bar_mode == 1 ? (std::max)(2, session_gap) :
+        (options.weekly_bar_mode == 0 ? session_gap : 1);
+    const auto bar_widths = CalculateQuotaBarWidths(sc(89), sc(69), options.weekly_bar_mode,
+        session_gap, weekly_gap, options.bar_style == 0);
+    const int bar_width = bar_widths.LayoutWidth();
     SIZE short_label{}, long_label{};
     GetTextExtentPoint32W(dc, L"5h", 2, &short_label);
     GetTextExtentPoint32W(dc, L"7d", 2, &long_label);
-    return sc(2 + 8 + 89 + 8 + 8 + columns * kResetCardColumnPitch) + (std::max)(short_label.cx, long_label.cx) + summary_width;
+    if (options.weekly_bar_mode == 0)
+        return sc(2 + 4 + 89 + 8 + 8 + columns * 16) + (std::max)(short_label.cx, long_label.cx) + summary_width;
+    return sc(2 + 4 + 8 + 8 + columns * 16) + bar_width + (std::max)(short_label.cx, long_label.cx) + summary_width;
 }
 
 void CCodexUsageItem::DrawItem(void* hDC, int x, int y, int w, int h, bool dark_mode)
@@ -1416,6 +1963,12 @@ void CCodexUsageItem::DrawItem(void* hDC, int x, int y, int w, int h, bool dark_
     const auto options = CCodexUsagePlugin::Instance().Options();
     const int row_height = options.show_session && options.show_weekly ? h / 2 : h;
     HDC dc = static_cast<HDC>(hDC);
+    const auto sc = [&](int n) { return ScaleForDpi(dc, n); };
+    SIZE short_label{}, long_label{};
+    GetTextExtentPoint32W(dc, L"5h", 2, &short_label);
+    GetTextExtentPoint32W(dc, L"7d", 2, &long_label);
+    static OfflineIcon offline_icon;
+    if (snapshot.remote_unavailable) offline_icon.Draw(dc, x + sc(2), y + sc(1), (std::max)(short_label.cx, long_label.cx), (std::max)(1, h - sc(2)));
     if (options.show_session) DrawRow(dc, snapshot, false, x, y, w, row_height, dark_mode);
     if (options.show_weekly) DrawRow(dc, snapshot, true, x, y + (options.show_session ? row_height : 0), w,
         options.show_session ? h - row_height : h, dark_mode);
