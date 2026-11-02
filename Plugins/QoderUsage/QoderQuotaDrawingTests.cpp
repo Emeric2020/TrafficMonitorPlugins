@@ -95,12 +95,10 @@ int wmain(int argc, wchar_t** argv)
     for (int dpi : {96, 120, 144, 192})
     {
         test_dpi = dpi;
-        int row_dip = 0;
-        assert(plugin.GetItem(0)->OnItemInfo(IPluginItem::IIT_TASKBAR_MIN_ROW_HEIGHT, &row_dip, nullptr));
-        assert(row_dip == 22);
-        const int row_height = MulDiv(row_dip, dpi, 96);
-        const int track_height = MulDiv(4, dpi, 96);
-        const int text_height = row_height - 4 - track_height - MulDiv(1, dpi, 96);
+        // Match the original host: 32-DIP total height, 16-DIP rows.
+        const int row_height = MulDiv(32, dpi, 96) / 2;
+        const int track_height = MulDiv(2, dpi, 96);
+        const int text_height = row_height - 4 - track_height - 1;
         Surface surface(MulDiv(480, dpi, 96), row_height * 8);
         HFONT font = CreateFontW(-MulDiv(12, dpi, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei");
@@ -139,18 +137,38 @@ int wmain(int argc, wchar_t** argv)
             if (row == 1)
             {
                 const int edge = top + row_height - 2 - static_cast<int>(std::lround(track_height * 0.8074));
-                assert(GetPixel(surface.dc, x + 2, edge - 1) == RGB(194, 202, 211));
+                assert(GetPixel(surface.dc, x + 2, edge - 1) == (edge == top + row_height - 2 - track_height ? RGB(236, 240, 242) : RGB(194, 202, 211)));
                 assert(GetPixel(surface.dc, x + 2, edge) == RGB(116, 170, 132));
             }
             assert(GetPixel(surface.dc, x + width - 2, top + 1) == background);
             assert(GetPixel(surface.dc, x + 2, top + row_height - 3) == expected);
+            if (row == 2) // a 50% cell exposes gray above its bottom-anchored color
+                assert(GetPixel(surface.dc, x + 2, top + row_height - 2 - track_height) == RGB(194, 202, 211));
+            int first_ink = row_height, last_ink = -1;
+            for (int scan_y = top + 3; scan_y < top + row_height - 2 - track_height; ++scan_y)
+                for (int pixel = x + 3; pixel < x + width - 3; ++pixel)
+                    if (GetPixel(surface.dc, pixel, scan_y) != RGB(236, 240, 242))
+                    {
+                        first_ink = (std::min)(first_ink, scan_y - top);
+                        last_ink = (std::max)(last_ink, scan_y - top);
+                    }
+            assert(last_ink >= first_ink);
+            const int top_space = first_ink - 3;
+            const int bottom_space = row_height - 3 - track_height - last_ink;
+            if (std::abs(top_space - bottom_space) > 1)
+            {
+                std::cerr << "Centering failure: dpi=" << dpi << " row=" << row << " top=" << top_space << " bottom=" << bottom_space << "\n";
+                surface.Save(output / L"centering-debug.bmp");
+            }
+            assert(std::abs(top_space - bottom_space) <= 1);
             HFONT compact_font = QuotaFont(surface.dc, text_height);
             const HGDIOBJ host_font = SelectObject(surface.dc, compact_font);
             const auto summary = CompactSummary(plugin.Snapshot(provider), provider);
             SIZE text{};
             GetTextExtentPoint32W(surface.dc, summary.c_str(), static_cast<int>(summary.size()), &text);
             assert(text.cx <= width - 2 * QuotaScale(surface.dc, 4));
-            assert(text.cy <= text_height);
+            const auto ink = QuotaInkBounds(surface.dc, summary);
+            assert(ink.second - ink.first <= text_height);
             SelectObject(surface.dc, host_font);
             DeleteObject(compact_font);
         }
@@ -187,7 +205,7 @@ int wmain(int argc, wchar_t** argv)
             }
             assert(runs == expected);
         };
-        color_runs(separator - 1 - track_height, 21); // gray is exposed at the top of the partial bottom-strip cell
+        color_runs(separator - 1 - track_height, std::lround(track_height * 0.8) == track_height ? 22 : 21); // honor subpixel rounding on very thin tracks
         color_runs(separator - 2, 22); // its remaining 80 credits stay anchored to the bottom
         color_runs(2 * row_height + 2 - track_height, 22);
         color_runs(2 * row_height + 1, 22);
@@ -241,7 +259,7 @@ int wmain(int argc, wchar_t** argv)
         plugin.GetItem(0)->DrawItem(surface.dc, 0, 0, 3, 3, false);
         SelectObject(surface.dc, previous);
         DeleteObject(font);
-        std::wcout << dpi << L" DPI: text panel / bottom strip, strict equal-width cells, 1px gaps, palette, depletion direction and GDI state passed\n";
+        std::wcout << dpi << L" DPI: original 16-DIP rows, optically centered text, equal-width cells / 1px gaps, depletion and GDI state passed\n";
     }
     return 0;
 }

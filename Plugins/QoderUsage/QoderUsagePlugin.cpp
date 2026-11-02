@@ -968,7 +968,7 @@ const wchar_t* CQoderUsagePlugin::GetInfo(PluginInfoIndex index)
     case TMI_NAME: return L"Qoder Usage";
     case TMI_DESCRIPTION: return L"Qoder quota and WorkBuddy desktop credit monitoring";
     case TMI_AUTHOR: return L"Qoder Usage Monitor contributors";
-    case TMI_VERSION: return L"0.7.0";
+    case TMI_VERSION: return L"0.8.0";
     case TMI_URL: return L"https://github.com/wang-yichun/qoder-usage-monitor";
     default: return L"";
     }
@@ -1296,8 +1296,45 @@ namespace
         return MulDiv(value, dpi > 0 ? dpi : USER_DEFAULT_SCREEN_DPI, USER_DEFAULT_SCREEN_DPI);
     }
 
-    // Measurement and drawing use the same smaller host font. Short rectangles may
-    // reduce it further, keeping the host typeface while avoiding vertical clipping.
+    int QuotaTrackHeight(HDC dc, int inner_height)
+    {
+        return (std::min)((std::max)(1, QuotaScale(dc, 2)), (std::max)(1, inner_height / 3));
+    }
+
+    int QuotaTextBudget(HDC dc, int row_height = 0)
+    {
+        // The host keeps its original 32-DIP total / 16-DIP row layout. A shared
+        // border adds one pixel to the upper row, without changing its font size.
+        const int canonical_row = QuotaScale(dc, 16);
+        const int inner_height = (row_height > 0 ? (std::min)(row_height, canonical_row) : canonical_row) - 4;
+        return (std::max)(1, inner_height - QuotaTrackHeight(dc, inner_height) - 1);
+    }
+
+    std::pair<int, int> QuotaInkBounds(HDC dc, const std::wstring& text)
+    {
+        MAT2 transform{};
+        transform.eM11.value = transform.eM22.value = 1;
+        int top = 0, bottom = 0;
+        for (wchar_t character : text)
+        {
+            GLYPHMETRICS glyph{};
+            if (GetGlyphOutlineW(dc, character, GGO_METRICS, &glyph, 0, nullptr, &transform) == GDI_ERROR)
+            {
+                TEXTMETRICW metrics{};
+                GetTextMetricsW(dc, &metrics);
+                return { -metrics.tmAscent, metrics.tmDescent };
+            }
+            if (glyph.gmBlackBoxY)
+            {
+                top = (std::min)(top, -static_cast<int>(glyph.gmptGlyphOrigin.y));
+                bottom = (std::max)(bottom, static_cast<int>(glyph.gmBlackBoxY) - static_cast<int>(glyph.gmptGlyphOrigin.y));
+            }
+        }
+        return { top, bottom };
+    }
+
+    // Fit visible glyph ink rather than the font's unused leading/descent, so the
+    // label stays readable at the original row height and measures like it draws.
     HFONT QuotaFont(HDC dc, int available_height = 0)
     {
         LOGFONTW font{};
@@ -1309,21 +1346,33 @@ namespace
         font.lfHeight = -(std::max)(1, MulDiv((std::max)(1L, std::abs(font.lfHeight)), 85, 100));
         font.lfWidth = 0;
         font.lfQuality = CLEARTYPE_QUALITY;
+        if (available_height <= 0) available_height = QuotaTextBudget(dc);
         HFONT result = CreateFontIndirectW(&font);
-        if (available_height > 0 && result)
+        while (result)
         {
             HGDIOBJ old = SelectObject(dc, result);
-            TEXTMETRICW metrics{};
-            GetTextMetricsW(dc, &metrics);
+            const auto ink = QuotaInkBounds(dc, L"QoderCN WorkBuddy 0123456789/.-");
             SelectObject(dc, old);
-            if (metrics.tmHeight > available_height)
-            {
-                font.lfHeight = -(std::max)(1, MulDiv(-font.lfHeight, available_height, metrics.tmHeight));
-                DeleteObject(result);
-                result = CreateFontIndirectW(&font);
-            }
+            if (ink.second - ink.first <= available_height || font.lfHeight == -1) break;
+            ++font.lfHeight;
+            DeleteObject(result);
+            result = CreateFontIndirectW(&font);
         }
         return result;
+    }
+
+    void DrawQuotaText(HDC dc, const RECT& area, const std::wstring& text)
+    {
+        const auto ink = QuotaInkBounds(dc, text);
+        const int baseline = area.top + (area.bottom - area.top - (ink.second - ink.first)) / 2 - ink.first;
+        TEXTMETRICW metrics{};
+        GetTextMetricsW(dc, &metrics);
+        RECT line{ area.left, baseline - metrics.tmAscent, area.right, baseline - metrics.tmAscent + metrics.tmHeight };
+        const int saved = SaveDC(dc);
+        if (!saved) return;
+        IntersectClipRect(dc, area.left, area.top, area.right, area.bottom);
+        DrawText(dc, line, text, RGB(0, 0, 0));
+        RestoreDC(dc, saved);
     }
 }
 
@@ -1368,10 +1417,10 @@ void CQoderUsageItem::DrawItem(void* hDC, int x, int y, int w, int h, bool /*dar
         RECT inner{ bar.left + 2, bar.top + 2, bar.right - 2, bar.bottom - 2 };
         paint(inner, RGB(236, 240, 242)); // stable, uniform background behind the text
         const int inner_height = inner.bottom - inner.top;
-        const int track_height = (std::min)((std::max)(1, QuotaScale(dc, 4)), (std::max)(1, inner_height / 3));
+        const int track_height = QuotaTrackHeight(dc, inner_height);
         RECT track{ inner.left, inner.bottom - track_height, inner.right, inner.bottom };
         paint(track, empty); // extend the gray track through the right-hand cell remainder
-        text_area.bottom = track.top - (std::max)(1, QuotaScale(dc, 1));
+        text_area.bottom = track.top - 1;
         const auto credits = CombinedCredits(snapshot, IsWorkBuddy(m_provider));
         if (snapshot.has_data && credits.second > 0.0 && std::isfinite(credits.second))
         {
@@ -1386,7 +1435,7 @@ void CQoderUsageItem::DrawItem(void* hDC, int x, int y, int w, int h, bool /*dar
             {
                 const double capacity = (std::min)(unit, credits.second - i * unit);
                 const double coverage = (std::clamp)((credits.first - i * unit) / capacity, 0.0, 1.0);
-                const int fill_height = static_cast<int>(std::lround(track_height * coverage));
+                const int fill_height = coverage > 0.0 ? (std::max)(1, static_cast<int>(std::lround(track_height * coverage))) : 0;
                 const int cell_left = track.left + i * (cell_width + 1);
                 RECT cell{ cell_left, track.bottom - fill_height, cell_left + cell_width, track.bottom };
                 paint(cell, fill); // consumption clears the cell from top to bottom
@@ -1396,13 +1445,15 @@ void CQoderUsageItem::DrawItem(void* hDC, int x, int y, int w, int h, bool /*dar
     HBRUSH border = CreateSolidBrush(RGB(0, 0, 0));
     if (border) { FrameRect(dc, &bar, border); DeleteObject(border); }
     const int padding = (std::max)(3, QuotaScale(dc, 4));
-    RECT text{ bar.left + padding, text_area.top, bar.right - padding, text_area.bottom };
+    // A one-device-pixel optical offset brings the label closer to the track,
+    // using the previous text/track gap without changing row height or font size.
+    RECT text{ bar.left + padding, text_area.top + 1, bar.right - padding, text_area.bottom + 1 };
     if (text.right > text.left && text.bottom > text.top)
     {
-        HFONT font = QuotaFont(dc, text.bottom - text.top);
+        HFONT font = QuotaFont(dc, QuotaTextBudget(dc, h));
         HGDIOBJ old_font = font ? SelectObject(dc, font) : nullptr;
         // Both taskbar themes have pale fills, requiring dark text for contrast.
-        DrawText(dc, text, CompactSummary(snapshot, m_provider), RGB(0, 0, 0));
+        DrawQuotaText(dc, text, CompactSummary(snapshot, m_provider));
         if (old_font) SelectObject(dc, old_font);
         if (font) DeleteObject(font);
     }

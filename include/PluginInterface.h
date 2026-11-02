@@ -138,8 +138,6 @@ public:
         // API 4 optional query: non-null opts two adjacent custom-drawn items of
         // the same plugin into a shared 1-device-pixel horizontal taskbar border.
         IIT_TASKBAR_SHARED_BORDER = 0x544d0100,
-        // Optional minimum row height in 96-DPI units, written to int* para1.
-        IIT_TASKBAR_MIN_ROW_HEIGHT = 0x544d0101,
     };
     //预留的接口
     virtual void* OnItemInfo(ItemInfoType, void* para1, void* para2) { return 0; }

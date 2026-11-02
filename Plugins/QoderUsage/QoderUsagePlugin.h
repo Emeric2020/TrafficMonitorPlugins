@@ -94,13 +94,8 @@ public:
     int GetItemWidthEx(void* hDC) const override;
     void DrawItem(void* hDC, int x, int y, int w, int h, bool dark_mode) override;
     int OnMouseEvent(MouseEventType type, int x, int y, void* hWnd, int flag) override;
-    void* OnItemInfo(ItemInfoType type, void* para1, void*) override
+    void* OnItemInfo(ItemInfoType type, void*, void*) override
     {
-        if (type == IIT_TASKBAR_MIN_ROW_HEIGHT && para1)
-        {
-            *static_cast<int*>(para1) = 22;
-            return this;
-        }
         return type == IIT_TASKBAR_SHARED_BORDER ? this : nullptr;
     }
     int IsDoubleLineExclusive() const override { return 0; }
