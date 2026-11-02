@@ -1069,10 +1069,60 @@ QoderSnapshot CQoderUsagePlugin::Snapshot() const
 
 void CQoderUsagePlugin::PublishSnapshot(QoderSnapshot snapshot)
 {
+    std::lock_guard<std::mutex> lock(m_snapshot_mutex);
+    const auto path = m_config_path.empty() ? std::filesystem::path{} :
+        std::filesystem::path(m_config_path).parent_path() / L"QoderUsage.history";
+    if (!m_history_loaded)
     {
-        std::lock_guard<std::mutex> lock(m_snapshot_mutex);
-        m_snapshot = std::move(snapshot);
+        m_history_loaded = true;
+        std::ifstream input(path);
+        std::string version, region;
+        CodexRecent::Window history;
+        double total{};
+        if (input >> version >> region >> total && version == "v1" &&
+            std::isfinite(total) && total > 0 && history.Read(input))
+        {
+            m_history = std::move(history);
+            m_history_total = total;
+            m_history_region.assign(region.begin(), region.end());
+        }
     }
+    if (snapshot.has_data)
+    {
+        double total = 0, remaining = 0;
+        for (const auto& row : snapshot.usage.rows)
+            if (row.quota.available && row.quota.total > 0)
+            {
+                total += row.quota.total;
+                remaining += (std::clamp)(row.quota.remaining, 0.0, row.quota.total);
+            }
+        if (total > 0)
+        {
+            if (m_history_region != snapshot.region || std::abs(m_history_total - total) > 0.001)
+                m_history = {};
+            m_history_total = total;
+            m_history_region = snapshot.region;
+            const long long now = snapshot.fetched_at;
+            const long long reset = snapshot.usage.cycle_expires_at > now ? snapshot.usage.cycle_expires_at : now + 10LL * 365 * 86400;
+            m_history.Record(now, 100.0 * (total - remaining) / total, reset, 30LL * 86400);
+            m_history.Prune(now);
+            snapshot.recent_percent = m_history.Recent(now, 86400);
+            snapshot.recent_buckets = m_history.RecentBuckets(now, 86400);
+            if (!path.empty())
+            {
+                std::error_code error;
+                std::filesystem::create_directories(path.parent_path(), error);
+                const auto temp = std::filesystem::path(path.wstring() + L".tmp");
+                std::ofstream output(temp, std::ios::trunc);
+                output << "v1 " << (m_history_region == L"cn" ? "cn" : "global") << ' '
+                    << std::setprecision(17) << m_history_total << '\n';
+                m_history.Write(output);
+                output.close();
+                if (output) MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+            }
+        }
+    }
+    m_snapshot = std::move(snapshot);
 }
 
 QoderOptions CQoderUsagePlugin::Options() const
@@ -1238,30 +1288,39 @@ namespace
         return (remaining < 0.0 ? std::wstring(L"--") : std::to_wstring(static_cast<int>(std::lround(remaining)))) + L"%";
     }
 
-    std::wstring CompactTime(long long target, long long now)
-    {
-        if (target <= 0) return L"--";
-        const auto seconds = (std::max)(0LL, target - now);
-        if (seconds >= 86400)
-            return std::to_wstring(seconds / 86400) + L"d " + std::to_wstring(seconds % 86400 / 3600) + L"h";
-        if (seconds >= 3600)
-            return std::to_wstring(seconds / 3600) + L"小时" + std::to_wstring(seconds % 3600 / 60) + L"分钟";
-        return std::to_wstring(seconds / 60) + L"分钟" + std::to_wstring(seconds % 60) + L"秒";
-    }
-
-    bool HideCompactCountdown(const QoderSnapshot& snapshot)
-    {
-        return snapshot.usage.cycle_expires_at - Now() > 365LL * 86400;
-    }
-
     std::wstring CompactSummary(const QoderSnapshot& snapshot)
     {
         const auto credits = CombinedCredits(snapshot);
-        const auto amount = snapshot.has_data && credits.second > 0.0
-            ? FormatNumber(credits.first) + L" / " + FormatNumber(credits.second) : L"-- / --";
-        if (HideCompactCountdown(snapshot)) return amount + L" Credits";
-        return amount + L" · " + CompactTime(snapshot.usage.cycle_expires_at, Now());
+        return L"Qoder " + (snapshot.has_data && credits.second > 0.0
+            ? FormatNumber(credits.first) + L"/" + FormatNumber(credits.second) : L"--/--");
     }
+
+    void DrawRecentHistogram(HDC dc, const RECT& area, const std::vector<double>& buckets)
+    {
+        const int width = area.right - area.left, height = area.bottom - area.top;
+        if (width <= 0 || height <= 2 || buckets.empty()) return;
+        const int columns = (std::min)(width, 96);
+        const size_t per_column = 15;
+        const size_t start = buckets.size() > static_cast<size_t>(columns) * per_column
+            ? buckets.size() - static_cast<size_t>(columns) * per_column : 0;
+        std::vector<double> values(columns, 0.0);
+        double maximum = 0;
+        for (int i = 0; i < columns; ++i)
+            for (size_t j = start + i * per_column; j < (std::min)(start + (i + 1) * per_column, buckets.size()); ++j)
+                maximum = (std::max)(maximum, values[i] += buckets[j]);
+        if (maximum <= 0) return;
+        HBRUSH brush = CreateSolidBrush(RGB(194, 202, 211));
+        if (!brush) return;
+        for (int i = 0; i < columns; ++i)
+            if (values[i] > 0)
+            {
+                const int bar_height = (std::max)(1, static_cast<int>(std::lround((height - 2) * values[i] / maximum)));
+                RECT bar{area.right - columns + i, area.bottom - bar_height, area.right - columns + i + 1, area.bottom};
+                FillRect(dc, &bar, brush);
+            }
+        DeleteObject(brush);
+    }
+
 }
 
 int CQoderUsageItem::GetItemWidthEx(void* hDC) const
@@ -1272,15 +1331,9 @@ int CQoderUsageItem::GetItemWidthEx(void* hDC) const
     const auto summary = CompactSummary(snapshot);
     SIZE size{};
     GetTextExtentPoint32W(dc, summary.c_str(), static_cast<int>(summary.size()), &size);
-    // Reserve the longest sub-day countdown so changing units cannot squeeze the text.
-    const auto credits = CombinedCredits(snapshot);
-    const std::wstring sample = FormatNumber(credits.second) + L" / " + FormatNumber(credits.second)
-        + (HideCompactCountdown(snapshot) ? L" Credits" : L" · 23小时59分钟");
-    SIZE sample_size{};
-    GetTextExtentPoint32W(dc, sample.c_str(), static_cast<int>(sample.size()), &sample_size);
     SIZE percent_size{};
     GetTextExtentPoint32W(dc, L"100%", 4, &percent_size);
-    return (std::max)((std::max)(static_cast<int>(size.cx), static_cast<int>(sample_size.cx)),
+    return (std::max)(static_cast<int>(size.cx),
         CompactSessionBarWidth(dc) + ScaleFromHeight(dc, 8) + static_cast<int>(percent_size.cx))
         + ScaleFromHeight(dc, 4);
 }
@@ -1316,6 +1369,12 @@ void CQoderUsageItem::DrawItem(void* hDC, int x, int y, int w, int h, bool dark_
         RECT cell{left + i * (cell_width + gap), top, left + i * (cell_width + gap) + cell_width, top + bar_height};
         HBRUSH brush = CreateSolidBrush(empty);
         FillRect(dc, &cell, brush); DeleteObject(brush);
+        const double recent_covered = remaining < 0.0 ? 0.0 : CodexRecent::Coverage(
+            (std::min)(100.0, remaining + snapshot.recent_percent), 10, i);
+        const int recent_height = static_cast<int>(std::lround(bar_height * recent_covered));
+        RECT recent_fill{cell.left, cell.bottom - recent_height, cell.right, cell.bottom};
+        brush = CreateSolidBrush(dark_mode ? RGB(101, 110, 120) : RGB(174, 183, 193));
+        FillRect(dc, &recent_fill, brush); DeleteObject(brush);
         const double covered = remaining < 0.0 ? 0.0 : (std::clamp)(remaining / 10.0 - i, 0.0, 1.0);
         const int fill_height = static_cast<int>(std::lround(bar_height * covered));
         if (fill_height > 0)
@@ -1348,6 +1407,8 @@ void CQoderUsageItem::DrawItem(void* hDC, int x, int y, int w, int h, bool dark_
     RECT percent_rect{left + drawn_width + sc(8), y, x + w, y + row_height};
     DrawText(dc, percent_rect, RemainingPercent(snapshot), dark_mode ? RGB(235, 238, 242) : RGB(45, 49, 54), DT_LEFT);
     RECT text_rect{left, y + row_height, x + w, y + h};
+    RECT histogram_rect{ text_rect.left, text_rect.top + sc(1), text_rect.right, text_rect.bottom - sc(1) };
+    DrawRecentHistogram(dc, histogram_rect, snapshot.recent_buckets);
     DrawText(dc, text_rect, CompactSummary(snapshot), dark_mode ? RGB(235, 238, 242) : RGB(45, 49, 54), DT_LEFT);
     if (saved) RestoreDC(dc, saved);
 }

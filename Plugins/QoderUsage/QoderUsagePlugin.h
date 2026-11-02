@@ -2,6 +2,7 @@
 
 #include "PluginInterface.h"
 #include "../CodexUsage/WorkdayCalendar.h"
+#include "../CodexUsage/RecentUsage.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -53,6 +54,8 @@ struct QoderSnapshot
     std::wstring region;              // "global", "cn", "demo"
     std::wstring status;              // human-readable status line
     bool has_data{};
+    double recent_percent{};
+    std::vector<double> recent_buckets;
 };
 
 struct QoderOptions
@@ -129,6 +132,10 @@ private:
 
     mutable std::mutex m_snapshot_mutex;
     QoderSnapshot m_snapshot;
+    CodexRecent::Window m_history;
+    double m_history_total{};
+    std::wstring m_history_region;
+    bool m_history_loaded{};
 
     std::mutex m_worker_mutex;
     std::condition_variable m_worker_cv;
