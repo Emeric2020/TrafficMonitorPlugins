@@ -4,6 +4,7 @@
 #include "../CodexUsage/WorkdayCalendar.h"
 #include "../CodexUsage/RecentUsage.h"
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
@@ -13,11 +14,14 @@
 
 namespace QoderDesktopAuth { struct Credential; }
 
+enum class QuotaProvider { Qoder, QoderChina, WorkBuddyInternational, WorkBuddyChina, Count };
+
 struct QoderQuota
 {
     double total{};
     double used{};
     double remaining{};
+    double reserved{};         // reported separately by WorkBuddy; already outside spendable balance
     double used_percentage{};   // 0..100
     std::wstring unit{ L"credits" };
     bool available{ true };
@@ -52,6 +56,7 @@ struct QoderSnapshot
     long long fetched_at{};
     std::wstring credential_label;   // human label only (no token)
     std::wstring region;              // "global", "cn", "demo"
+    std::wstring history_identity;    // provider/account boundary for local usage history
     std::wstring status;              // human-readable status line
     bool has_data{};
     double recent_percent{};
@@ -63,7 +68,7 @@ struct QoderOptions
     int poll_seconds{ 300 };          // 60 / 300 / 900 / 3600
     int theme{};                      // 0 host, 1 light, 2 dark
     int bar_style{};                  // 0 segmented, 1 continuous
-    int region{};                     // 0 auto, 1 global, 2 cn
+    int region{};                     // legacy setting retained; each item now has a fixed region
     int alert_threshold{};            // 0 off, 1 50, 2 25, 3 10
     bool show_total{ true };
     bool show_cycle{ true };
@@ -78,6 +83,7 @@ struct QoderOptions
 class CQoderUsageItem : public IPluginItem
 {
 public:
+    explicit CQoderUsageItem(QuotaProvider provider = QuotaProvider::Qoder) : m_provider(provider) {}
     const wchar_t* GetItemName() const override;
     const wchar_t* GetItemId() const override;
     const wchar_t* GetItemLableText() const override;
@@ -91,6 +97,8 @@ public:
     int IsDoubleLineExclusive() const override { return 1; }
     int IsDrawResourceUsageGraph() const override { return 0; }
     float GetResourceUsageGraphValue() const override;
+private:
+    QuotaProvider m_provider{};
 };
 
 class CQoderUsagePlugin : public ITMPlugin
@@ -104,7 +112,7 @@ public:
     void OnInitialize(ITrafficMonitor* app) override;
     void OnShutdown() override;
     const wchar_t* GetTooltipInfo() override;
-    int GetCommandCount() override { return 3; }
+    int GetCommandCount() override { return 6; }
     const wchar_t* GetCommandName(int command_index) override;
     void* GetCommandIcon(int /*command_index*/) override { return nullptr; }
     void OnPluginCommand(int command_index, void* hWnd, void* para) override;
@@ -112,10 +120,10 @@ public:
 
     QoderOptions Options() const;
     bool SaveOptions(const QoderOptions& options);
-    QoderSnapshot Snapshot() const;
+    QoderSnapshot Snapshot(QuotaProvider provider = QuotaProvider::Qoder) const;
     bool IsChinese() const { return m_is_chinese; }
     void RequestRefresh();
-    void PublishSnapshot(QoderSnapshot snapshot);
+    void PublishSnapshot(QoderSnapshot snapshot, QuotaProvider provider = QuotaProvider::Qoder);
     ITrafficMonitor* App() const { return m_app; }
 
 private:
@@ -127,15 +135,22 @@ private:
     QoderOptions m_options;
     std::wstring m_config_path;
     CQoderUsageItem m_item;
+    CQoderUsageItem m_qoder_cn_item{ QuotaProvider::QoderChina };
+    CQoderUsageItem m_workbuddy_item{ QuotaProvider::WorkBuddyChina };
+    CQoderUsageItem m_workbuddy_intl_item{ QuotaProvider::WorkBuddyInternational };
     ITrafficMonitor* m_app{};
     bool m_is_chinese{ true };
 
     mutable std::mutex m_snapshot_mutex;
-    QoderSnapshot m_snapshot;
-    CodexRecent::Window m_history;
-    double m_history_total{};
-    std::wstring m_history_region;
-    bool m_history_loaded{};
+    struct ProviderState
+    {
+        QoderSnapshot snapshot;
+        CodexRecent::Window history;
+        double history_total{};
+        std::wstring history_identity;
+        bool history_loaded{};
+    };
+    std::array<ProviderState, static_cast<size_t>(QuotaProvider::Count)> m_provider_states;
 
     std::mutex m_worker_mutex;
     std::condition_variable m_worker_cv;

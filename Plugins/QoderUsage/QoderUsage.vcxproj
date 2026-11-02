@@ -61,11 +61,13 @@
     <ClInclude Include="JsonValue.h" />
     <ClInclude Include="QoderDesktopAuth.h" />
     <ClInclude Include="QoderUsagePlugin.h" />
+    <ClInclude Include="WorkBuddyUsage.h" />
     <ClInclude Include="OptionsResource.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="QoderDesktopAuth.cpp" />
     <ClCompile Include="QoderUsagePlugin.cpp" />
+    <ClCompile Include="WorkBuddyUsage.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="QoderUsage.rc" />

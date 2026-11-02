@@ -4,6 +4,7 @@
 
 #include "QoderUsagePlugin.h"
 #include "QoderDesktopAuth.h"
+#include "WorkBuddyUsage.h"
 #include "JsonValue.h"
 #include "OptionsResource.h"
 #include "PluginTooltipGuard.h"
@@ -59,6 +60,42 @@ namespace
     int g_popup_dpi{ 96 };
     POINT g_popup_anchor{};
     ULONGLONG g_popup_opened{};
+    QuotaProvider g_popup_provider{};
+
+    bool IsWorkBuddy(QuotaProvider provider)
+    {
+        return provider == QuotaProvider::WorkBuddyChina || provider == QuotaProvider::WorkBuddyInternational;
+    }
+
+    bool IsChina(QuotaProvider provider)
+    {
+        return provider == QuotaProvider::QoderChina || provider == QuotaProvider::WorkBuddyChina;
+    }
+
+    QoderDesktopAuth::Edition QoderEdition(QuotaProvider provider)
+    {
+        return provider == QuotaProvider::QoderChina ? QoderDesktopAuth::Edition::China : QoderDesktopAuth::Edition::International;
+    }
+
+    WorkBuddyUsage::Edition BuddyEdition(QuotaProvider provider)
+    {
+        return provider == QuotaProvider::WorkBuddyInternational
+            ? WorkBuddyUsage::Edition::International : WorkBuddyUsage::Edition::China;
+    }
+
+    const wchar_t* ProviderName(QuotaProvider provider)
+    {
+        if (provider == QuotaProvider::QoderChina) return L"QoderCN";
+        if (provider == QuotaProvider::WorkBuddyChina) return L"WorkBuddyCN";
+        if (provider == QuotaProvider::WorkBuddyInternational) return L"WorkBuddy";
+        return L"Qoder";
+    }
+
+    std::wstring ApplicationPath(QuotaProvider provider)
+    {
+        return IsWorkBuddy(provider) ? WorkBuddyUsage::ExecutablePath(BuddyEdition(provider))
+            : QoderDesktopAuth::ExecutablePath(QoderEdition(provider));
+    }
 
     // ---------- helpers ----------
 
@@ -315,14 +352,16 @@ namespace
 
     // ---------- snapshot ----------
 
-    void RefreshSnapshotWorker()
+    void RefreshSnapshotWorker(QuotaProvider provider)
     {
         auto& plugin = CQoderUsagePlugin::Instance();
-        const QoderOptions options = plugin.Options();
         const bool cn = plugin.IsChinese();
 
         QoderSnapshot snapshot;
         snapshot.fetched_at = Now();
+        const bool china = provider == QuotaProvider::QoderChina;
+        const auto& region = kRegions[china ? 1 : 0];
+        snapshot.region = region.name;
         HMODULE module{};
         wchar_t module_path[32768]{};
         if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -342,33 +381,17 @@ namespace
         }
 
         QoderDesktopAuth::Credential credential;
-        if (!QoderDesktopAuth::LoadDesktopCredential(credential))
+        if (!QoderDesktopAuth::LoadDesktopCredential(credential, QoderEdition(provider)))
         {
-            snapshot.status = cn ? L"未找到 Qoder 桌面应用凭据" : L"Qoder desktop credentials not found";
-            snapshot.region = L"none";
-            plugin.PublishSnapshot(snapshot);
+            snapshot.status = std::wstring(ProviderName(provider)) + (cn ? L" 未找到桌面登录凭据" : L" desktop credentials not found");
+            plugin.PublishSnapshot(snapshot, provider);
             return;
         }
-        snapshot.credential_label = cn
-            ? L"桌面应用令牌（auth.v1.dat）"
-            : L"Desktop token (auth.v1.dat)";
-
-        std::vector<int> order;
-        if (options.region == 1) order = { 0 };
-        else if (options.region == 2) order = { 1 };
-        else order = { 0, 1 };
-
+        snapshot.credential_label = credential.origin + L" / auth.v1.dat";
         std::wstring body;
-        bool success = false;
-        for (int idx : order)
-        {
-            if (HttpGet(kRegions[idx].base, credential.token, kUsagePath, body))
-            {
-                snapshot.region = kRegions[idx].name;
-                success = true;
-                break;
-            }
-        }
+        // Each visible item has one credential source and one destination. Never retry a
+        // token against the other region or let the legacy Region setting swap accounts.
+        const bool success = HttpGet(region.base, credential.token, kUsagePath, body);
         if (!success)
         {
             snapshot.status = cn ? L"Qoder 接口请求失败" : L"Qoder request failed";
@@ -397,7 +420,7 @@ namespace
                 snapshot.status = cn ? L"账号未返回额度数据" : L"No quota data returned";
         }
         SecureZeroMemory(credential.token.data(), credential.token.size() * sizeof(wchar_t));
-        plugin.PublishSnapshot(snapshot);
+        plugin.PublishSnapshot(snapshot, provider);
     }
 
     // ---------- drawing ----------
@@ -598,10 +621,11 @@ namespace
     std::vector<std::pair<std::wstring, std::wstring>> BuildDetailLines()
     {
         std::vector<std::pair<std::wstring, std::wstring>> lines;
-        const QoderSnapshot snapshot = CQoderUsagePlugin::Instance().Snapshot();
+        const QoderSnapshot snapshot = CQoderUsagePlugin::Instance().Snapshot(g_popup_provider);
         const bool cn = CQoderUsagePlugin::Instance().IsChinese();
         lines.emplace_back(cn ? L"连接" : L"Status", snapshot.status);
-        lines.emplace_back(cn ? L"区域" : L"Region", snapshot.region);
+        const auto region = cn ? std::wstring(IsChina(g_popup_provider) ? L"中国（cn）" : L"国际（global）") : snapshot.region;
+        lines.emplace_back(cn ? L"区域" : L"Region", region);
         lines.emplace_back(cn ? L"凭据" : L"Credential", snapshot.credential_label);
         if (snapshot.fetched_at > 0)
             lines.emplace_back(cn ? L"更新于" : L"Updated",
@@ -619,9 +643,11 @@ namespace
             lines.emplace_back(cn ? L"周期到期" : L"Cycle ends",
                 FormatLocalTime(snapshot.usage.cycle_expires_at) + L" (" + Countdown(snapshot.usage.cycle_expires_at) + L")");
         }
+        int package_index = 0;
         for (const QoderQuotaRow& row : snapshot.usage.rows)
         {
-            std::wstring label = row.label.empty() ? QuotaLabel(row.kind, cn) : row.label;
+            std::wstring label = IsWorkBuddy(g_popup_provider) && cn ? L"积分包 " + std::to_wstring(++package_index)
+                : row.label.empty() ? QuotaLabel(row.kind, cn) : row.label;
             std::wstring value;
             if (row.quota.total > 0.0)
             {
@@ -630,6 +656,8 @@ namespace
                     + L" (" + std::to_wstring(static_cast<int>(std::lround(row.quota.used_percentage))) + L"%)";
                 if (row.quota.expires_at > 0)
                     value += L" · " + Countdown(row.quota.expires_at);
+                if (IsWorkBuddy(g_popup_provider) && row.quota.reserved > 0)
+                    value += (cn ? L" · 冻结 " : L" · Reserved ") + FormatNumber(row.quota.reserved);
             }
             lines.emplace_back(std::move(label), std::move(value));
         }
@@ -698,11 +726,16 @@ namespace
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
             HGDIOBJ old_font = SelectObject(dc, title_font);
-            PluginAppButton::Draw(hwnd, dc, g_popup_dpi, false);
+            RECT button = PluginAppButton::Bounds(hwnd, g_popup_dpi);
+            DrawFrameControl(dc, &button, DFC_BUTTON, DFCS_BUTTONPUSH);
+            SetTextColor(dc, RGB(45, 49, 54));
+            const auto button_text = std::wstring(cn ? L"打开 " : L"Open ") + ProviderName(g_popup_provider);
+            ::DrawTextW(dc, button_text.c_str(), -1, &button, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             RECT title{ pad, MulDiv(10, g_popup_dpi, 96), rect.right - pad, MulDiv(38, g_popup_dpi, 96) };
             SetTextColor(dc, RGB(46, 48, 52));
-            const wchar_t* title_text = cn ? L"Qoder 用量详情" : L"Qoder usage details";
-            ::DrawTextW(dc, title_text, -1, &title, DT_SINGLELINE | DT_VCENTER);
+            const std::wstring title_text = std::wstring(ProviderName(g_popup_provider))
+                + (cn ? (IsWorkBuddy(g_popup_provider) ? L" 积分详情" : L" 用量详情") : L" usage details");
+            ::DrawTextW(dc, title_text.c_str(), -1, &title, DT_SINGLELINE | DT_VCENTER);
             SelectObject(dc, old_font);
             DeleteObject(title_font);
 
@@ -734,7 +767,21 @@ namespace
             return 0;
         }
         case WM_LBUTTONUP:
-            if (PluginAppButton::Click(hwnd, g_popup_dpi, lParam, false)) return 0;
+        {
+            const POINT point{ static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam)) };
+            const RECT button = PluginAppButton::Bounds(hwnd, g_popup_dpi);
+            if (PtInRect(&button, point))
+            {
+                const auto path = ApplicationPath(g_popup_provider);
+                if (path.empty() || reinterpret_cast<INT_PTR>(ShellExecuteW(hwnd, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) <= 32)
+                {
+                    const auto error_text = std::wstring(ProviderName(g_popup_provider)) + L" 无法打开，请确认已安装。";
+                    MessageBoxW(hwnd, error_text.c_str(), L"TrafficMonitor", MB_OK | MB_ICONWARNING);
+                }
+                else ShowWindow(hwnd, SW_HIDE);
+                return 0;
+            }
+        }
         {
             RECT rect{}; GetClientRect(hwnd, &rect);
             const int side = MulDiv(32, g_popup_dpi, 96);
@@ -764,14 +811,15 @@ namespace
         g_popup_instance = nullptr;
     }
 
-    void ShowDetailPopup(HWND owner)
+    void ShowDetailPopup(HWND owner, QuotaProvider provider = QuotaProvider::Qoder)
     {
         if (owner == nullptr || !IsWindow(owner)) return;
-        if (g_detail_popup && IsWindowVisible(g_detail_popup))
+        if (g_detail_popup && IsWindowVisible(g_detail_popup) && g_popup_provider == provider)
         {
             ShowWindow(g_detail_popup, SW_HIDE);
             return;
         }
+        g_popup_provider = provider;
         GetCursorPos(&g_popup_anchor);
         g_popup_opened = GetTickCount64();
         if (!g_detail_popup)
@@ -876,9 +924,9 @@ namespace
                    : std::initializer_list<const wchar_t*>{ L"Segmented", L"Continuous" },
                 options.bar_style);
             combo(IDC_QODER_REGION,
-                cn ? std::initializer_list<const wchar_t*>{ L"自动", L"global", L"cn" }
-                   : std::initializer_list<const wchar_t*>{ L"Auto", L"global", L"cn" },
-                options.region);
+                cn ? std::initializer_list<const wchar_t*>{ L"按显示项固定区域" }
+                   : std::initializer_list<const wchar_t*>{ L"Fixed per display item" }, 0);
+            EnableWindow(GetDlgItem(dialog, IDC_QODER_REGION), FALSE);
             combo(IDC_QODER_ALERT,
                 cn ? std::initializer_list<const wchar_t*>{ L"关", L"50%", L"25%", L"10%" }
                    : std::initializer_list<const wchar_t*>{ L"Off", L"50%", L"25%", L"10%" },
@@ -949,8 +997,6 @@ namespace
                     static_cast<int>(SendDlgItemMessageW(dialog, IDC_QODER_THEME, CB_GETCURSEL, 0, 0)), 0, 2);
                 options.bar_style = (std::clamp)(
                     static_cast<int>(SendDlgItemMessageW(dialog, IDC_QODER_BAR, CB_GETCURSEL, 0, 0)), 0, 1);
-                options.region = (std::clamp)(
-                    static_cast<int>(SendDlgItemMessageW(dialog, IDC_QODER_REGION, CB_GETCURSEL, 0, 0)), 0, 2);
                 options.alert_threshold = (std::clamp)(
                     static_cast<int>(SendDlgItemMessageW(dialog, IDC_QODER_ALERT, CB_GETCURSEL, 0, 0)), 0, 3);
                 options.show_total = IsDlgButtonChecked(dialog, IDC_QODER_TOTAL) == BST_CHECKED;
@@ -999,7 +1045,11 @@ CQoderUsagePlugin& CQoderUsagePlugin::Instance()
 
 IPluginItem* CQoderUsagePlugin::GetItem(int index)
 {
-    return index == 0 ? &m_item : nullptr;
+    if (index == 0) return &m_item;
+    if (index == 1) return &m_qoder_cn_item;
+    if (index == 2) return &m_workbuddy_intl_item;
+    if (index == 3) return &m_workbuddy_item;
+    return nullptr;
 }
 
 void CQoderUsagePlugin::DataRequired()
@@ -1012,9 +1062,9 @@ const wchar_t* CQoderUsagePlugin::GetInfo(PluginInfoIndex index)
     switch (index)
     {
     case TMI_NAME: return L"Qoder Usage";
-    case TMI_DESCRIPTION: return L"Qoder account credits, packages, and cycle countdown";
+    case TMI_DESCRIPTION: return L"Qoder quota and WorkBuddy desktop credit monitoring";
     case TMI_AUTHOR: return L"Qoder Usage Monitor contributors";
-    case TMI_VERSION: return L"0.1.0";
+    case TMI_VERSION: return L"0.4.0";
     case TMI_URL: return L"https://github.com/wang-yichun/qoder-usage-monitor";
     default: return L"";
     }
@@ -1051,7 +1101,19 @@ void CQoderUsagePlugin::PollLoop()
 {
     while (!m_stop.load())
     {
-        RefreshSnapshotWorker();
+        RefreshSnapshotWorker(QuotaProvider::Qoder);
+        if (m_stop.load()) break;
+        RefreshSnapshotWorker(QuotaProvider::QoderChina);
+        if (m_stop.load()) break;
+        for (const auto provider : { QuotaProvider::WorkBuddyChina, QuotaProvider::WorkBuddyInternational })
+        {
+            if (m_stop.load()) break;
+            QoderSnapshot workbuddy;
+            workbuddy.calendar = Snapshot().calendar;
+            WorkBuddyUsage::Refresh(workbuddy, IsChinese(), BuddyEdition(provider));
+            workbuddy.fetched_at = Now();
+            PublishSnapshot(std::move(workbuddy), provider);
+        }
         std::unique_lock<std::mutex> lock(m_worker_mutex);
         const int seconds = Options().poll_seconds;
         m_worker_cv.wait_for(lock, std::chrono::seconds(seconds), [this] {
@@ -1061,30 +1123,40 @@ void CQoderUsagePlugin::PollLoop()
     }
 }
 
-QoderSnapshot CQoderUsagePlugin::Snapshot() const
+QoderSnapshot CQoderUsagePlugin::Snapshot(QuotaProvider provider) const
 {
     std::lock_guard<std::mutex> lock(m_snapshot_mutex);
-    return m_snapshot;
+    return m_provider_states.at(static_cast<size_t>(provider)).snapshot;
 }
 
-void CQoderUsagePlugin::PublishSnapshot(QoderSnapshot snapshot)
+void CQoderUsagePlugin::PublishSnapshot(QoderSnapshot snapshot, QuotaProvider provider)
 {
     std::lock_guard<std::mutex> lock(m_snapshot_mutex);
+    const bool workbuddy = IsWorkBuddy(provider);
+    const wchar_t* history_file = provider == QuotaProvider::WorkBuddyInternational ? L"WorkBuddyInternationalUsage.history"
+        : provider == QuotaProvider::WorkBuddyChina ? L"WorkBuddyUsage.history"
+        : provider == QuotaProvider::QoderChina ? L"QoderCNUsage.history" : L"QoderUsage.history";
     const auto path = m_config_path.empty() ? std::filesystem::path{} :
-        std::filesystem::path(m_config_path).parent_path() / L"QoderUsage.history";
-    if (!m_history_loaded)
+        std::filesystem::path(m_config_path).parent_path() / history_file;
+    auto& state = m_provider_states.at(static_cast<size_t>(provider));
+    auto& history = state.history;
+    auto& history_total = state.history_total;
+    auto& history_identity = state.history_identity;
+    auto& history_loaded = state.history_loaded;
+    const auto identity = snapshot.history_identity.empty() ? snapshot.region : snapshot.history_identity;
+    if (!history_loaded)
     {
-        m_history_loaded = true;
+        history_loaded = true;
         std::ifstream input(path);
         std::string version, region;
-        CodexRecent::Window history;
+        CodexRecent::Window saved_history;
         double total{};
         if (input >> version >> region >> total && version == "v1" &&
-            std::isfinite(total) && total > 0 && history.Read(input))
+            std::isfinite(total) && total > 0 && saved_history.Read(input))
         {
-            m_history = std::move(history);
-            m_history_total = total;
-            m_history_region.assign(region.begin(), region.end());
+            history = std::move(saved_history);
+            history_total = total;
+            history_identity.assign(region.begin(), region.end());
         }
     }
     if (snapshot.has_data)
@@ -1094,35 +1166,38 @@ void CQoderUsagePlugin::PublishSnapshot(QoderSnapshot snapshot)
             if (row.quota.available && row.quota.total > 0)
             {
                 total += row.quota.total;
-                remaining += (std::clamp)(row.quota.remaining, 0.0, row.quota.total);
+                remaining += workbuddy ? (std::max)(0.0, row.quota.remaining)
+                    : (std::clamp)(row.quota.remaining, 0.0, row.quota.total);
             }
         if (total > 0)
         {
-            if (m_history_region != snapshot.region || std::abs(m_history_total - total) > 0.001)
-                m_history = {};
-            m_history_total = total;
-            m_history_region = snapshot.region;
+            if (history_identity != identity || std::abs(history_total - total) > 0.001)
+                history = {};
+            history_total = total;
+            history_identity = identity;
             const long long now = snapshot.fetched_at;
             const long long reset = snapshot.usage.cycle_expires_at > now ? snapshot.usage.cycle_expires_at : now + 10LL * 365 * 86400;
-            m_history.Record(now, 100.0 * (total - remaining) / total, reset, 30LL * 86400);
-            m_history.Prune(now);
-            snapshot.recent_percent = m_history.Recent(now, 86400);
-            snapshot.recent_buckets = m_history.RecentBuckets(now, 86400);
+            history.Record(now, (std::max)(0.0, 100.0 * (total - remaining) / total), reset, 30LL * 86400);
+            history.Prune(now);
+            snapshot.recent_percent = history.Recent(now, 86400);
+            snapshot.recent_buckets = history.RecentBuckets(now, 86400);
             if (!path.empty())
             {
                 std::error_code error;
                 std::filesystem::create_directories(path.parent_path(), error);
                 const auto temp = std::filesystem::path(path.wstring() + L".tmp");
                 std::ofstream output(temp, std::ios::trunc);
-                output << "v1 " << (m_history_region == L"cn" ? "cn" : "global") << ' '
-                    << std::setprecision(17) << m_history_total << '\n';
-                m_history.Write(output);
+                std::string saved_identity;
+                for (wchar_t ch : history_identity) saved_identity.push_back(static_cast<char>(ch));
+                output << "v1 " << saved_identity << ' '
+                    << std::setprecision(17) << history_total << '\n';
+                history.Write(output);
                 output.close();
                 if (output) MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
             }
         }
     }
-    m_snapshot = std::move(snapshot);
+    state.snapshot = std::move(snapshot);
 }
 
 QoderOptions CQoderUsagePlugin::Options() const
@@ -1189,18 +1264,24 @@ void CQoderUsagePlugin::RequestRefresh()
 const wchar_t* CQoderUsagePlugin::GetTooltipInfo()
 {
     thread_local std::wstring result;
-    QoderSnapshot snapshot;
+    result.clear();
+    for (const auto provider : { QuotaProvider::Qoder, QuotaProvider::QoderChina,
+        QuotaProvider::WorkBuddyInternational, QuotaProvider::WorkBuddyChina })
     {
-        std::lock_guard<std::mutex> lock(m_snapshot_mutex);
-        snapshot = m_snapshot;
-    }
-    result = snapshot.status;
-    if (snapshot.has_data)
-    {
-        if (snapshot.usage.total_usage_percentage >= 0.0)
-            result += L" | " + std::to_wstring(static_cast<int>(std::lround(snapshot.usage.total_usage_percentage))) + L"%";
-        if (snapshot.usage.cycle_expires_at > 0)
-            result += L" | " + Countdown(snapshot.usage.cycle_expires_at);
+        const auto snapshot = Snapshot(provider);
+        if (!result.empty()) result += L"\n";
+        result += std::wstring(ProviderName(provider)) + L": " + snapshot.status;
+        if (snapshot.has_data)
+        {
+            double remaining = 0, total = 0;
+            for (const auto& row : snapshot.usage.rows)
+            {
+                if (!row.quota.available || row.quota.total <= 0) continue;
+                remaining += IsWorkBuddy(provider) ? row.quota.remaining : (std::clamp)(row.quota.remaining, 0.0, row.quota.total);
+                total += row.quota.total;
+            }
+            result += L" | " + FormatNumber(remaining) + L"/" + FormatNumber(total);
+        }
     }
     return result.c_str();
 }
@@ -1209,8 +1290,11 @@ const wchar_t* CQoderUsagePlugin::GetCommandName(int command_index)
 {
     const bool cn = IsChinese();
     if (command_index == 0) return cn ? L"显示 Qoder 用量详情" : L"Show Qoder usage details";
-    if (command_index == 1) return cn ? L"立即刷新 Qoder 用量" : L"Refresh Qoder usage now";
+    if (command_index == 1) return cn ? L"立即刷新全部用量" : L"Refresh all usage now";
     if (command_index == 2) return cn ? L"在浏览器中打开用量详情" : L"Open usage page in browser";
+    if (command_index == 3) return cn ? L"显示 WorkBuddyCN 积分详情" : L"Show WorkBuddyCN credits";
+    if (command_index == 4) return cn ? L"显示 WorkBuddy 积分详情" : L"Show WorkBuddy credits";
+    if (command_index == 5) return cn ? L"显示 QoderCN 用量详情" : L"Show QoderCN usage details";
     return nullptr;
 }
 
@@ -1229,11 +1313,17 @@ void CQoderUsagePlugin::OnPluginCommand(int command_index, void* hWnd, void*)
         std::wstring url;
         {
             std::lock_guard<std::mutex> lock(m_snapshot_mutex);
-            url = m_snapshot.usage.detail_url;
+            url = m_provider_states[0].snapshot.usage.detail_url;
         }
         if (!url.empty())
             ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     }
+    else if (command_index == 3)
+        ShowDetailPopup(static_cast<HWND>(hWnd), QuotaProvider::WorkBuddyChina);
+    else if (command_index == 4)
+        ShowDetailPopup(static_cast<HWND>(hWnd), QuotaProvider::WorkBuddyInternational);
+    else if (command_index == 5)
+        ShowDetailPopup(static_cast<HWND>(hWnd), QuotaProvider::QoderChina);
 }
 
 ITMPlugin::OptionReturn CQoderUsagePlugin::ShowOptionsDialog(void* hParent)
@@ -1253,10 +1343,16 @@ ITMPlugin::OptionReturn CQoderUsagePlugin::ShowOptionsDialog(void* hParent)
 
 const wchar_t* CQoderUsageItem::GetItemName() const
 {
-    return CQoderUsagePlugin::Instance().IsChinese() ? L"Qoder 额度" : L"Qoder quota";
+    return ProviderName(m_provider);
 }
 
-const wchar_t* CQoderUsageItem::GetItemId() const { return L"QoderUsageQuota9"; }
+const wchar_t* CQoderUsageItem::GetItemId() const
+{
+    if (m_provider == QuotaProvider::QoderChina) return L"QoderCNUsageQuota";
+    if (m_provider == QuotaProvider::WorkBuddyChina) return L"WorkBuddyCredits"; // preserve existing selection
+    if (m_provider == QuotaProvider::WorkBuddyInternational) return L"WorkBuddyInternationalCredits";
+    return L"QoderUsageQuota9";
+}
 
 const wchar_t* CQoderUsageItem::GetItemLableText() const { return L""; }
 const wchar_t* CQoderUsageItem::GetItemValueText() const { return L""; }
@@ -1264,34 +1360,35 @@ const wchar_t* CQoderUsageItem::GetItemValueSampleText() const { return L"合计
 
 namespace
 {
-    std::pair<double, double> CombinedCredits(const QoderSnapshot& snapshot)
+    std::pair<double, double> CombinedCredits(const QoderSnapshot& snapshot, bool workbuddy)
     {
         double total = 0.0, remaining = 0.0;
         for (const auto& row : snapshot.usage.rows)
         {
             if (!row.quota.available || row.quota.total <= 0.0) continue;
             total += row.quota.total;
-            remaining += (std::clamp)(row.quota.remaining, 0.0, row.quota.total);
+            remaining += workbuddy ? (std::max)(0.0, row.quota.remaining)
+                : (std::clamp)(row.quota.remaining, 0.0, row.quota.total);
         }
         return { remaining, total };
     }
 
-    double CombinedRemaining(const QoderSnapshot& snapshot)
+    double CombinedRemaining(const QoderSnapshot& snapshot, bool workbuddy)
     {
-        const auto credits = CombinedCredits(snapshot);
-        return snapshot.has_data && credits.second > 0.0 ? credits.first / credits.second * 100.0 : -1.0;
+        const auto credits = CombinedCredits(snapshot, workbuddy);
+        return snapshot.has_data ? (credits.second > 0.0 ? credits.first / credits.second * 100.0 : 0.0) : -1.0;
     }
 
-    std::wstring RemainingPercent(const QoderSnapshot& snapshot)
+    std::wstring RemainingPercent(const QoderSnapshot& snapshot, bool workbuddy)
     {
-        const double remaining = CombinedRemaining(snapshot);
-        return (remaining < 0.0 ? std::wstring(L"--") : std::to_wstring(static_cast<int>(std::lround(remaining)))) + L"%";
+        const double remaining = CombinedRemaining(snapshot, workbuddy);
+        return (remaining < 0.0 ? std::wstring(L"--") : std::to_wstring(static_cast<int>(std::lround((std::min)(100.0, remaining))))) + L"%";
     }
 
-    std::wstring CompactSummary(const QoderSnapshot& snapshot)
+    std::wstring CompactSummary(const QoderSnapshot& snapshot, QuotaProvider provider)
     {
-        const auto credits = CombinedCredits(snapshot);
-        return L"Qoder " + (snapshot.has_data && credits.second > 0.0
+        const auto credits = CombinedCredits(snapshot, IsWorkBuddy(provider));
+        return std::wstring(ProviderName(provider)) + L" " + (snapshot.has_data
             ? FormatNumber(credits.first) + L"/" + FormatNumber(credits.second) : L"--/--");
     }
 
@@ -1327,10 +1424,18 @@ int CQoderUsageItem::GetItemWidthEx(void* hDC) const
 {
     if (!hDC) return 320;
     HDC dc = static_cast<HDC>(hDC);
-    const auto snapshot = CQoderUsagePlugin::Instance().Snapshot();
-    const auto summary = CompactSummary(snapshot);
+    const auto snapshot = CQoderUsagePlugin::Instance().Snapshot(m_provider);
+    const auto summary = CompactSummary(snapshot, m_provider);
     SIZE size{};
     GetTextExtentPoint32W(dc, summary.c_str(), static_cast<int>(summary.size()), &size);
+    {
+        // The host measures once before the first asynchronous billing result arrives.
+        const std::wstring sample = std::wstring(ProviderName(m_provider))
+            + (IsWorkBuddy(m_provider) ? L" 88888.8/88888.8" : L" 8888.8/8888.8");
+        SIZE minimum{};
+        GetTextExtentPoint32W(dc, sample.c_str(), static_cast<int>(sample.size()), &minimum);
+        size.cx = (std::max)(size.cx, minimum.cx);
+    }
     SIZE percent_size{};
     GetTextExtentPoint32W(dc, L"100%", 4, &percent_size);
     return (std::max)(static_cast<int>(size.cx),
@@ -1345,13 +1450,13 @@ void CQoderUsageItem::DrawItem(void* hDC, int x, int y, int w, int h, bool dark_
     const int saved = SaveDC(dc);
     IntersectClipRect(dc, x, y, x + w, y + h);
     const auto options = CQoderUsagePlugin::Instance().Options();
-    const auto snapshot = CQoderUsagePlugin::Instance().Snapshot();
+    const auto snapshot = CQoderUsagePlugin::Instance().Snapshot(m_provider);
     if (options.theme != 0) dark_mode = options.theme == 2;
     TEXTMETRICW metrics{}; GetTextMetricsW(dc, &metrics);
     const auto sc = [&](int n) { return MulDiv(n, (std::max)(16L, metrics.tmHeight), 16); };
     const int row_height = h / 2;
     const int left = x + sc(2);
-    const double remaining = CombinedRemaining(snapshot);
+    const double remaining = CombinedRemaining(snapshot, IsWorkBuddy(m_provider));
     const COLORREF filled = remaining <= 20.0
         ? (dark_mode ? RGB(242, 139, 130) : RGB(197, 34, 31))
         : remaining <= 50.0
@@ -1405,18 +1510,18 @@ void CQoderUsageItem::DrawItem(void* hDC, int x, int y, int w, int h, bool dark_
     DeleteObject(work);
     DeleteObject(rest);
     RECT percent_rect{left + drawn_width + sc(8), y, x + w, y + row_height};
-    DrawText(dc, percent_rect, RemainingPercent(snapshot), dark_mode ? RGB(235, 238, 242) : RGB(45, 49, 54), DT_LEFT);
+    DrawText(dc, percent_rect, RemainingPercent(snapshot, IsWorkBuddy(m_provider)), dark_mode ? RGB(235, 238, 242) : RGB(45, 49, 54), DT_LEFT);
     RECT text_rect{left, y + row_height, x + w, y + h};
     RECT histogram_rect{ text_rect.left, text_rect.top + sc(1), text_rect.right, text_rect.bottom - sc(1) };
     DrawRecentHistogram(dc, histogram_rect, snapshot.recent_buckets);
-    DrawText(dc, text_rect, CompactSummary(snapshot), dark_mode ? RGB(235, 238, 242) : RGB(45, 49, 54), DT_LEFT);
+    DrawText(dc, text_rect, CompactSummary(snapshot, m_provider), dark_mode ? RGB(235, 238, 242) : RGB(45, 49, 54), DT_LEFT);
     if (saved) RestoreDC(dc, saved);
 }
 int CQoderUsageItem::OnMouseEvent(MouseEventType type, int /*x*/, int /*y*/, void* hWnd, int /*flag*/)
 {
     if (type == MT_LCLICKED)
     {
-        ShowDetailPopup(static_cast<HWND>(hWnd));
+        ShowDetailPopup(static_cast<HWND>(hWnd), m_provider);
         return 1;
     }
     return 0;
@@ -1424,7 +1529,7 @@ int CQoderUsageItem::OnMouseEvent(MouseEventType type, int /*x*/, int /*y*/, voi
 
 float CQoderUsageItem::GetResourceUsageGraphValue() const
 {
-    const QoderSnapshot snapshot = CQoderUsagePlugin::Instance().Snapshot();
+    const QoderSnapshot snapshot = CQoderUsagePlugin::Instance().Snapshot(m_provider);
     if (snapshot.usage.total_usage_percentage < 0.0) return 0.0f;
     return static_cast<float>((std::clamp)(snapshot.usage.total_usage_percentage / 100.0, 0.0, 1.0));
 }

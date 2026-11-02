@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <filesystem>
 #include <iterator>
 #include <string>
 #include <vector>
@@ -75,9 +76,13 @@ namespace
         return value;
     }
 
-    std::wstring FindFirstAppDir(const std::wstring& appdata)
+    std::wstring FindFirstAppDir(const std::wstring& appdata, QoderDesktopAuth::Edition edition)
     {
-        const wchar_t* const names[] = { L"com.qoder.app.stable", L"com.qoder.app" };
+        const bool china = edition == QoderDesktopAuth::Edition::China;
+        const wchar_t* const names[] = {
+            china ? L"com.qodercn.app.stable" : L"com.qoder.app.stable",
+            china ? L"com.qodercn.app" : L"com.qoder.app"
+        };
         for (const auto* name : names)
         {
             std::wstring dir = appdata;
@@ -154,12 +159,12 @@ namespace
     }
 }
 
-bool QoderDesktopAuth::LoadDesktopCredential(Credential& credential)
+bool QoderDesktopAuth::LoadDesktopCredential(Credential& credential, Edition edition)
 {
     credential = {};
     const std::wstring appdata = AppDataDir();
     if (appdata.empty()) return false;
-    const std::wstring local_state = FindFirstAppDir(appdata);
+    const std::wstring local_state = FindFirstAppDir(appdata, edition);
     if (local_state.empty()) return false;
 
     const std::wstring local_state_text = ReadUtf8File(local_state);
@@ -211,6 +216,18 @@ bool QoderDesktopAuth::LoadDesktopCredential(Credential& credential)
 
     credential.token = token;
     credential.expires_at = ParseEpoch(auth_root.Get(L"expiresAt"));
-    credential.origin = L"desktop";
+    credential.origin = std::filesystem::path(local_state).parent_path().filename().wstring();
     return true;
+}
+
+std::wstring QoderDesktopAuth::ExecutablePath(Edition edition)
+{
+    wchar_t local[MAX_PATH]{};
+    const DWORD size = GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
+    if (!size || size >= MAX_PATH) return {};
+    const bool china = edition == Edition::China;
+    const auto path = std::filesystem::path(local) / L"Programs" / (china ? L"Qoder CN" : L"Qoder")
+        / (china ? L"Qoder CN.exe" : L"Qoder.exe");
+    std::error_code error;
+    return std::filesystem::is_regular_file(path, error) ? path.wstring() : std::wstring{};
 }
