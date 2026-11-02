@@ -25,6 +25,7 @@ namespace
     constexpr wchar_t kUsageHost[] = L"chatgpt.com";
     constexpr wchar_t kUsagePath[] = L"/backend-api/wham/usage";
     constexpr wchar_t kCreditsPath[] = L"/backend-api/wham/rate-limit-reset-credits";
+    constexpr int kResetCardColumnPitch = 15;
     constexpr DWORD kHttpTimeoutMs = 5000;
     constexpr wchar_t kDetailPopupClass[] = L"TrafficMonitorCodexUsageDetails";
 
@@ -951,7 +952,7 @@ namespace
         for (int i = double_row && weekly ? 1 : 0; i < count; i += double_row ? 2 : 1)
         {
             const int card_size = (std::max)(10, (std::min)(sc(14), row_height - sc(3)));
-            const int bx = badge_x + (double_row ? i / 2 : i) * (card_size + sc(2));
+            const int bx = badge_x + (double_row ? i / 2 : i) * sc(kResetCardColumnPitch);
             if (bx + card_size > x + w) break;
             RECT badge{ bx, y + (row_height - card_size) / 2, bx + card_size, y + (row_height - card_size) / 2 + card_size };
             const long long expiry = static_cast<size_t>(i) < snapshot.reset_credit_expiries.size() ? snapshot.reset_credit_expiries[i] : 0;
@@ -1405,7 +1406,7 @@ int CCodexUsageItem::GetItemWidthEx(void* hDC) const
     SIZE short_label{}, long_label{};
     GetTextExtentPoint32W(dc, L"5h", 2, &short_label);
     GetTextExtentPoint32W(dc, L"7d", 2, &long_label);
-    return sc(2 + 8 + 89 + 8 + 8 + columns * 16) + (std::max)(short_label.cx, long_label.cx) + summary_width;
+    return sc(2 + 8 + 89 + 8 + 8 + columns * kResetCardColumnPitch) + (std::max)(short_label.cx, long_label.cx) + summary_width;
 }
 
 void CCodexUsageItem::DrawItem(void* hDC, int x, int y, int w, int h, bool dark_mode)

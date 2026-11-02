@@ -141,13 +141,13 @@ public:
     virtual void* OnItemInfo(ItemInfoType, void* para1, void* para2) { return 0; }
 
     /**
-     * @brief 是否在在任务栏中显示此项目的资源占用图
-     * @return 1：显示，0：不显示
+     * @brief 任务栏中此项目资源占用图的显示方式
+     * @return 0：不显示，1：跟随主程序设置，2：始终显示从左到右的横向柱状图
      */
     virtual int IsDrawResourceUsageGraph() const { return 0; }
 
     /**
-     * @brief 获取资源占用图的值。当IsDrawResourceUsageGraphType返回值不为0时有效
+     * @brief 获取资源占用图的值。当IsDrawResourceUsageGraph返回值不为0时有效
      * @return float 资源占用图的值，范围为0.0~1.0。
      */
     virtual float GetResourceUsageGraphValue() const { return 0.0; }
@@ -271,6 +271,8 @@ public:
         EI_TASKBAR_WND_NOT_SHOW_PERCENT,        //不显示百分号
 
         EI_CONFIG_DIR,                      //配置文件的目录
+
+        EI_DRAW_RESOURCE_USAGE_GRAPH,        //任务栏资源占用图上下文（1：可绘制，0：不可绘制）
     };
 
     /**
