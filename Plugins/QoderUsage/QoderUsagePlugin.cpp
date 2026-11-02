@@ -968,7 +968,7 @@ const wchar_t* CQoderUsagePlugin::GetInfo(PluginInfoIndex index)
     case TMI_NAME: return L"Qoder Usage";
     case TMI_DESCRIPTION: return L"Qoder quota and WorkBuddy desktop credit monitoring";
     case TMI_AUTHOR: return L"Qoder Usage Monitor contributors";
-    case TMI_VERSION: return L"0.5.0";
+    case TMI_VERSION: return L"0.7.0";
     case TMI_URL: return L"https://github.com/wang-yichun/qoder-usage-monitor";
     default: return L"";
     }
@@ -1352,14 +1352,10 @@ void CQoderUsageItem::DrawItem(void* hDC, int x, int y, int w, int h, bool /*dar
     const auto snapshot = CQoderUsagePlugin::Instance().Snapshot(m_provider);
     const double remaining = CombinedRemaining(snapshot, IsWorkBuddy(m_provider));
     const COLORREF empty = RGB(194, 202, 211); // light gray of the previous quota cells
-    const COLORREF fill = remaining <= 20.0 ? RGB(250, 225, 224)
-        : remaining <= 50.0 ? RGB(255, 243, 191) : RGB(218, 240, 220);
-    const COLORREF outline = remaining < 0.0 ? empty
-        : remaining <= 20.0 ? RGB(198, 83, 79)
-        : remaining <= 50.0 ? RGB(177, 140, 51) : RGB(94, 151, 104);
-    const int bar_height = (std::min)(h, (std::max)(5, QuotaScale(dc, 18)));
-    const int top = y + (h - bar_height) / 2;
-    const RECT bar{ x, top, x + w, top + bar_height };
+    const COLORREF fill = remaining <= 20.0 ? RGB(207, 128, 123)
+        : remaining <= 50.0 ? RGB(213, 174, 75) : RGB(116, 170, 132);
+    const RECT bar{ x, y, x + w, y + h };
+    RECT text_area{ bar.left + 2, bar.top + 2, bar.right - 2, bar.bottom - 2 };
     const auto paint = [&](const RECT& rect, COLORREF color) {
         if (rect.right <= rect.left || rect.bottom <= rect.top) return;
         HBRUSH brush = CreateSolidBrush(color);
@@ -1367,25 +1363,46 @@ void CQoderUsageItem::DrawItem(void* hDC, int x, int y, int w, int h, bool /*dar
     };
     // Like Codex reset cards: geometry/text scale with DPI, while the outline
     // and visible gap each remain exactly one physical pixel at every scale.
-    if (w >= 5 && bar_height >= 5)
+    if (w >= 5 && h >= 5)
     {
         RECT inner{ bar.left + 2, bar.top + 2, bar.right - 2, bar.bottom - 2 };
-        paint(inner, empty);
-        const int filled_width = static_cast<int>(std::lround((inner.right - inner.left)
-            * (std::clamp)(remaining, 0.0, 100.0) / 100.0));
-        RECT progress{ inner.left, inner.top, inner.left + filled_width, inner.bottom };
-        paint(progress, fill);
+        paint(inner, RGB(236, 240, 242)); // stable, uniform background behind the text
+        const int inner_height = inner.bottom - inner.top;
+        const int track_height = (std::min)((std::max)(1, QuotaScale(dc, 4)), (std::max)(1, inner_height / 3));
+        RECT track{ inner.left, inner.bottom - track_height, inner.right, inner.bottom };
+        paint(track, empty); // extend the gray track through the right-hand cell remainder
+        text_area.bottom = track.top - (std::max)(1, QuotaScale(dc, 1));
+        const auto credits = CombinedCredits(snapshot, IsWorkBuddy(m_provider));
+        if (snapshot.has_data && credits.second > 0.0 && std::isfinite(credits.second))
+        {
+            const int inner_width = inner.right - inner.left;
+            // Each cell represents 100 credits (the last may represent less).
+            // At extreme quotas, group cells rather than lose the 1px gaps or widen the label.
+            const double requested = std::ceil(credits.second / 100.0);
+            const int count = static_cast<int>((std::min)(requested, static_cast<double>((inner_width + 1) / 2)));
+            const double unit = requested > count ? credits.second / count : 100.0;
+            const int cell_width = (inner_width - (count - 1)) / count;
+            for (int i = 0; i < count; ++i)
+            {
+                const double capacity = (std::min)(unit, credits.second - i * unit);
+                const double coverage = (std::clamp)((credits.first - i * unit) / capacity, 0.0, 1.0);
+                const int fill_height = static_cast<int>(std::lround(track_height * coverage));
+                const int cell_left = track.left + i * (cell_width + 1);
+                RECT cell{ cell_left, track.bottom - fill_height, cell_left + cell_width, track.bottom };
+                paint(cell, fill); // consumption clears the cell from top to bottom
+            }
+        }
     }
-    HBRUSH border = CreateSolidBrush(outline);
+    HBRUSH border = CreateSolidBrush(RGB(0, 0, 0));
     if (border) { FrameRect(dc, &bar, border); DeleteObject(border); }
     const int padding = (std::max)(3, QuotaScale(dc, 4));
-    RECT text{ bar.left + padding, bar.top + 2, bar.right - padding, bar.bottom - 2 };
+    RECT text{ bar.left + padding, text_area.top, bar.right - padding, text_area.bottom };
     if (text.right > text.left && text.bottom > text.top)
     {
         HFONT font = QuotaFont(dc, text.bottom - text.top);
         HGDIOBJ old_font = font ? SelectObject(dc, font) : nullptr;
         // Both taskbar themes have pale fills, requiring dark text for contrast.
-        DrawText(dc, text, CompactSummary(snapshot, m_provider), RGB(45, 49, 54));
+        DrawText(dc, text, CompactSummary(snapshot, m_provider), RGB(0, 0, 0));
         if (old_font) SelectObject(dc, old_font);
         if (font) DeleteObject(font);
     }
