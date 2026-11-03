@@ -963,7 +963,7 @@ namespace
     QuotaBarWidths CalculateQuotaBarWidths(int base_width, int compact_width, int weekly_bar_mode,
         int session_bar_mode, int session_gap, int weekly_gap, bool segmented)
     {
-        if (!segmented || weekly_bar_mode == 0) return { base_width, base_width };
+        if (!segmented || (weekly_bar_mode == 0 && session_bar_mode == 0)) return { base_width, base_width };
 
         const int session_segments = session_bar_mode == 1 ? 5 : 10;
         const int weekly_segments = weekly_bar_mode == 1 ? 7 : weekly_bar_mode >= 2 ? 14 : 10;
@@ -975,7 +975,7 @@ namespace
                 (candidate - (session_segments - 1) * session_gap) % session_segments == 0 &&
                 (candidate - (weekly_segments - 1) * weekly_gap) % weekly_segments == 0;
         };
-        if (weekly_bar_mode == 2 || weekly_bar_mode == 1)
+        if (weekly_bar_mode <= 2)
         {
             // Keep both rows aligned while choosing the nearest width that divides into whole cells.
             for (int delta = 0; delta <= 1000; ++delta)
@@ -1113,11 +1113,12 @@ namespace
             DeleteObject(brush);
             const double covered = available ? CodexRecent::Coverage(remaining, segments, i) : 0.0;
             const int fill_height = static_cast<int>(std::lround(bar_height * covered));
-            if (fill_height > 0)
+            const int fill_width = static_cast<int>(std::lround(segment_width * covered));
+            if (vertical_fill ? fill_height > 0 : fill_width > 0)
             {
                 RECT fill = vertical_fill
                     ? RECT{ bar.left, bar.bottom - fill_height, bar.right, bar.bottom }
-                    : RECT{ bar.left, bar.top, bar.left + static_cast<int>(std::lround(segment_width * covered)), bar.bottom };
+                    : RECT{ bar.left, bar.top, bar.left + fill_width, bar.bottom };
                 brush = CreateSolidBrush(filled);
                 FillRect(dc, &fill, brush);
                 DeleteObject(brush);
