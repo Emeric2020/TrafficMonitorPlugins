@@ -58,7 +58,21 @@ async function query(){
  const json=await response.json();
  if(json.code!==0||!json.data)return emit({error:'api'});
  const data=json.data;
- emit({code:0,account:crypto.createHash('sha256').update(session.account.uid).digest('hex').slice(0,16),data:{
+ let checkin=null;
+ if(!international) try {
+  const status=await fetch('https://'+expectedDomain+'/v2/billing/meter/checkin-activity-status',{
+   method:'POST',body:'{}',redirect:'error',signal:AbortSignal.timeout(8000),
+   headers:{Authorization:'Bearer '+token,'X-User-Id':session.account.uid,'Content-Type':'application/json',
+    'Accept-Language':'zh','X-Product':'workbuddy','User-Agent':'Mozilla/5.0'} });
+  const result=await status.json();
+  if(status.ok && result.code===0 && result.data && typeof result.data.active==='boolean' &&
+     typeof result.data.today_checked_in==='boolean') {
+   const d=result.data; checkin={active:d.active,today_checked_in:d.today_checked_in,
+    daily_credit:d.daily_credit,today_credit:d.today_credit,streak_days:d.streak_days,
+    activity_name:d.activity_name,start_time:d.start_time,end_time:d.end_time};
+  }
+ } catch {}
+ emit({code:0,checkin,account:crypto.createHash('sha256').update(session.account.uid).digest('hex').slice(0,16),data:{
   SubscriptionPackageName:data.SubscriptionPackageName,
   Packages:Array.isArray(data.Packages)?data.Packages.map(p=>({PackageCode:p.PackageCode,
    CycleTotalCapacity:p.CycleTotalCapacity,CycleRemainCapacity:p.CycleRemainCapacity,
@@ -260,6 +274,22 @@ bool WorkBuddyUsage::ParseSummary(const std::wstring& json, QoderSnapshot& snaps
     // An empty package list is a valid zero balance. Unknown units are not credits.
     if (!packages->array.empty() && usage.rows.empty()) return false;
     usage.total_usage_percentage = total > 0 ? (std::max)(0.0, (total - remaining) / total * 100) : 0;
+    if (edition == Edition::China)
+    {
+        const auto checkin = root.Get(L"checkin");
+        const auto active = checkin ? checkin->Get(L"active") : nullptr;
+        const auto done = checkin ? checkin->Get(L"today_checked_in") : nullptr;
+        if (active && done && active->type == JsonValue::Type::Boolean && done->type == JsonValue::Type::Boolean)
+        {
+            snapshot.checkin_known = true; snapshot.checkin_active = active->boolean; snapshot.checkin_done = done->boolean;
+            ReadCount(checkin, L"daily_credit", snapshot.checkin_daily);
+            ReadCount(checkin, L"today_credit", snapshot.checkin_today);
+            ReadCount(checkin, L"streak_days", snapshot.checkin_streak);
+            if (const auto v = checkin->Get(L"activity_name")) snapshot.checkin_activity = v->String();
+            if (const auto v = checkin->Get(L"start_time")) snapshot.checkin_start = v->String();
+            if (const auto v = checkin->Get(L"end_time")) snapshot.checkin_end = v->String();
+        }
+    }
     snapshot.usage = std::move(usage);
     snapshot.history_identity = edition == Edition::International ? L"workbuddy-global" : L"workbuddy-cn";
     if (account && account->type == JsonValue::Type::String && account->string.size() == 16 &&

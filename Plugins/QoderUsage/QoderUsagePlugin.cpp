@@ -591,6 +591,22 @@ namespace
         if (snapshot.fetched_at > 0)
             lines.emplace_back(cn ? L"更新于" : L"Updated",
                 FormatLocalTime(snapshot.fetched_at));
+        if (g_popup_provider == QuotaProvider::WorkBuddyChina)
+        {
+            const auto state = !snapshot.checkin_known ? (cn ? L"状态未知" : L"Unknown")
+                : !snapshot.checkin_active ? (cn ? L"活动未开放" : L"Inactive")
+                : snapshot.checkin_done ? (cn ? L"今日已领取" : L"Claimed today") : (cn ? L"今日可领取" : L"Available today");
+            lines.emplace_back(cn ? L"每日签到" : L"Daily check-in", state);
+            if (snapshot.checkin_known && snapshot.checkin_active)
+            {
+                if (!snapshot.checkin_activity.empty()) lines.emplace_back(cn ? L"活动" : L"Activity", snapshot.checkin_activity);
+                lines.emplace_back(cn ? L"每日积分" : L"Daily credits", FormatNumber(snapshot.checkin_daily));
+                lines.emplace_back(cn ? L"今日积分" : L"Today credits", FormatNumber(snapshot.checkin_today));
+                lines.emplace_back(cn ? L"连续签到" : L"Streak", FormatNumber(snapshot.checkin_streak) + (cn ? L" 天" : L" days"));
+                if (!snapshot.checkin_start.empty()) lines.emplace_back(cn ? L"活动开始" : L"Starts", snapshot.checkin_start);
+                if (!snapshot.checkin_end.empty()) lines.emplace_back(cn ? L"活动结束" : L"Ends", snapshot.checkin_end);
+            }
+        }
         if (!snapshot.usage.user_type.empty())
             lines.emplace_back(cn ? L"套餐" : L"Plan", snapshot.usage.user_type);
         if (snapshot.usage.quota_exceeded)
@@ -1456,6 +1472,21 @@ void CQoderUsageItem::DrawItem(void* hDC, int x, int y, int w, int h, bool /*dar
         DrawQuotaText(dc, text, CompactSummary(snapshot, m_provider));
         if (old_font) SelectObject(dc, old_font);
         if (font) DeleteObject(font);
+    }
+    if (m_provider == QuotaProvider::WorkBuddyChina && snapshot.checkin_known && snapshot.checkin_active && !snapshot.checkin_done)
+    {
+        const int size = (std::min)((std::max)(1, QuotaScale(dc, 7) - 1), (std::min)(w - 2, h - 2));
+        HBRUSH marker = CreateSolidBrush(RGB(232, 110, 125));
+        if (marker && size > 0)
+        {
+            HGDIOBJ old = SelectObject(dc, marker);
+            HGDIOBJ pen = SelectObject(dc, GetStockObject(NULL_PEN));
+            const POINT points[] = { { x + 1, y + 1 }, { x + 1 + size, y + 1 }, { x + 1, y + 1 + size } };
+            Polygon(dc, points, 3);
+            SelectObject(dc, pen);
+            SelectObject(dc, old);
+        }
+        if (marker) DeleteObject(marker);
     }
     RestoreDC(dc, saved);
 }

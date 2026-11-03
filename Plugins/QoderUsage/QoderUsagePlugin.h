@@ -59,6 +59,9 @@ struct QoderSnapshot
     std::wstring history_identity;    // provider/account boundary for local usage history
     std::wstring status;              // human-readable status line
     bool has_data{};
+    bool checkin_known{}, checkin_active{}, checkin_done{};
+    double checkin_daily{}, checkin_today{}, checkin_streak{};
+    std::wstring checkin_activity, checkin_start, checkin_end;
     double recent_percent{};
     std::vector<double> recent_buckets;
 };
