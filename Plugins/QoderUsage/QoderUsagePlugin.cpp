@@ -279,7 +279,7 @@ namespace
 
     // ---------- HTTP ----------
 
-    bool HttpGet(const wchar_t* base, const std::wstring& token, const wchar_t* path, std::wstring& body)
+    bool HttpGet(const wchar_t* base, const std::wstring& token, const wchar_t* path, std::wstring& body, bool campaign = false)
     {
         if (token.empty()) return false;
         // WinHttpConnect expects a hostname, not an https:// URL.
@@ -298,7 +298,13 @@ namespace
         Handle request(WinHttpOpenRequest(connection, L"GET", path, nullptr,
             WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE));
         if (!request) return false;
+        if (campaign)
+        {
+            DWORD redirect = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+            if (!WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY, &redirect, sizeof(redirect))) return false;
+        }
         std::wstring headers = L"Authorization: Bearer " + token + L"\r\nAccept: application/json\r\n";
+        if (campaign) headers += L"Cosy-ClientType: 10\r\n";
         const BOOL sent = WinHttpSendRequest(request, headers.c_str(), static_cast<DWORD>(headers.size()),
             WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
         SecureZeroMemory(headers.data(), headers.size() * sizeof(wchar_t));
@@ -397,6 +403,32 @@ namespace
             }
             else
                 snapshot.status = cn ? L"账号未返回额度数据" : L"No quota data returned";
+        }
+        // The campaign list is read-only. A missing or malformed list remains unknown.
+        std::wstring campaign_body;
+        if (provider == QuotaProvider::Qoder && HttpGet(region.base, credential.token, L"/sash/api/v1/me/campaigns?forceRefresh=true", campaign_body, true))
+        {
+            JsonValue campaign_root;
+            if (ParseJson(campaign_body, campaign_root))
+            {
+                const JsonValue* data = campaign_root.Get(L"data");
+                if (!data || data->type != JsonValue::Type::Object) data = &campaign_root;
+                const JsonValue* campaigns = data->Get(L"campaigns");
+                if (campaigns && campaigns->type == JsonValue::Type::Array)
+                {
+                    snapshot.checkin_known = true;
+                    for (const auto& campaign : campaigns->array)
+                    {
+                        const auto action = campaign.Get(L"actionType");
+                        const auto status = campaign.Get(L"claimStatus");
+                        if (action && status && action->String() == L"CLAIM_BENEFIT" && status->String() == L"CLAIMABLE")
+                        {
+                            snapshot.checkin_active = true;
+                            break;
+                        }
+                    }
+                }
+            }
         }
         SecureZeroMemory(credential.token.data(), credential.token.size() * sizeof(wchar_t));
         plugin.PublishSnapshot(snapshot, provider);
@@ -1473,7 +1505,8 @@ void CQoderUsageItem::DrawItem(void* hDC, int x, int y, int w, int h, bool /*dar
         if (old_font) SelectObject(dc, old_font);
         if (font) DeleteObject(font);
     }
-    if (m_provider == QuotaProvider::WorkBuddyChina && snapshot.checkin_known && snapshot.checkin_active && !snapshot.checkin_done)
+    if ((m_provider == QuotaProvider::WorkBuddyChina || m_provider == QuotaProvider::Qoder) &&
+        snapshot.checkin_known && snapshot.checkin_active && !snapshot.checkin_done)
     {
         const int size = (std::min)((std::max)(1, QuotaScale(dc, 7) - 1), (std::min)(w - 2, h - 2));
         HBRUSH marker = CreateSolidBrush(RGB(232, 110, 125));
