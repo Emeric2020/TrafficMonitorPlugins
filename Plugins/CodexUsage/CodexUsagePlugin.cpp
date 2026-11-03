@@ -961,60 +961,44 @@ namespace
     };
 
     QuotaBarWidths CalculateQuotaBarWidths(int base_width, int compact_width, int weekly_bar_mode,
-        int session_gap, int weekly_gap, bool segmented)
+        int session_bar_mode, int session_gap, int weekly_gap, bool segmented)
     {
         if (!segmented || weekly_bar_mode == 0) return { base_width, base_width };
 
+        const int session_segments = session_bar_mode == 1 ? 5 : 10;
+        const int weekly_segments = weekly_bar_mode == 1 ? 7 : weekly_bar_mode >= 2 ? 14 : 10;
         // Compact 14-cell mode starts from a narrower shared width; all rows still end on the same pixel.
         int shared_width = weekly_bar_mode == 2 ? compact_width : base_width;
-        if (weekly_bar_mode == 2)
+        const auto fits = [&](int candidate)
         {
-            // Equal 10/14-cell bars with 1px gaps recur every 70px; choose the closest scaled width.
-            for (int delta = 0; delta <= 35; ++delta)
+            return candidate > 0 &&
+                (candidate - (session_segments - 1) * session_gap) % session_segments == 0 &&
+                (candidate - (weekly_segments - 1) * weekly_gap) % weekly_segments == 0;
+        };
+        if (weekly_bar_mode == 2 || weekly_bar_mode == 1)
+        {
+            // Keep both rows aligned while choosing the nearest width that divides into whole cells.
+            for (int delta = 0; delta <= 1000; ++delta)
             {
-                const int candidates[] = { compact_width + delta, compact_width - delta };
-                bool found = false;
+                const int candidates[] = { shared_width + delta, shared_width - delta };
                 for (const int candidate : candidates)
                 {
-                    if (candidate > 0 &&
-                        (candidate - 9 * session_gap) % 10 == 0 &&
-                        (candidate - 13 * weekly_gap) % 14 == 0)
+                    if (fits(candidate))
                     {
                         shared_width = candidate;
-                        found = true;
-                        break;
+                        return { shared_width, shared_width };
                     }
-                }
-                if (found) break;
-            }
-        }
-        else if (weekly_bar_mode >= 2)
-        {
-            for (int candidate = shared_width; candidate <= shared_width + 1000; ++candidate)
-            {
-                if ((candidate - 9 * session_gap) % 10 == 0 &&
-                    (candidate - 13 * weekly_gap) % 14 == 0)
-                {
-                    shared_width = candidate;
-                    break;
                 }
             }
         }
         else
         {
-            for (int delta = 0; delta <= 35; ++delta)
+            for (int candidate = shared_width; candidate <= shared_width + 1000; ++candidate)
             {
-                const int candidates[] = { base_width + delta, base_width - delta };
-                for (const int candidate : candidates)
+                if (fits(candidate))
                 {
-                    if (candidate > 0 &&
-                        (candidate - 9 * session_gap) % 10 == 0 &&
-                        (candidate - 6 * weekly_gap) % 7 == 0)
-                    {
-                        shared_width = candidate;
-                        delta = 36;
-                        break;
-                    }
+                    shared_width = candidate;
+                    break;
                 }
             }
         }
@@ -1093,14 +1077,17 @@ namespace
         const int weekly_gap = options.weekly_bar_mode == 1 ? (std::max)(2, session_gap) :
             (options.weekly_bar_mode == 0 ? session_gap : 1);
         const auto bar_widths = CalculateQuotaBarWidths(base_bar_width, sc(69), options.weekly_bar_mode,
-            session_gap, weekly_gap, options.bar_style == 0);
+            options.session_bar_mode, session_gap, weekly_gap, options.bar_style == 0);
         const int bar_width = weekly ? bar_widths.weekly : bar_widths.session;
         const int gap = options.bar_style == 0 ? (weekly ? weekly_gap : session_gap) : 0;
         const int segments = options.bar_style == 0
-            ? (weekly ? (options.weekly_bar_mode == 1 ? 7 : options.weekly_bar_mode >= 2 ? 14 : 10) : 10)
+            ? (weekly ? (options.weekly_bar_mode == 1 ? 7 : options.weekly_bar_mode >= 2 ? 14 : 10)
+                : (options.session_bar_mode == 1 ? 5 : 10))
             : 1;
         const int segment_content_width = bar_width - (segments - 1) * gap;
         const int segment_width = segment_content_width / segments;
+        const int fill_direction = weekly ? options.weekly_fill_direction : options.session_fill_direction;
+        const bool vertical_fill = options.bar_style == 0 && fill_direction == 0;
         const int time_gap = 1;
         const int time_height = (std::max)(1, sc(2));
         const int row_gap = (std::max)(3, sc(3));
@@ -1114,11 +1101,11 @@ namespace
             HBRUSH brush = CreateSolidBrush(empty);
             FillRect(dc, &bar, brush);
             DeleteObject(brush);
-            // Each cell represents 10%. As quota is used, its colored fill recedes from top to bottom.
+            // Recent usage follows the selected within-cell fill direction.
             const double recent_covered = available ? CodexRecent::Coverage(
                 (std::min)(100.0, remaining + recent), segments, i) : 0.0;
             const int recent_height = static_cast<int>(std::lround(bar_height * recent_covered));
-            RECT recent_fill = options.bar_style == 0
+            RECT recent_fill = vertical_fill
                 ? RECT{bar.left, bar.bottom - recent_height, bar.right, bar.bottom}
                 : RECT{bar.left, bar.top, bar.left + static_cast<int>(std::lround(segment_width * recent_covered)), bar.bottom};
             brush = CreateSolidBrush(recent_color);
@@ -1128,7 +1115,7 @@ namespace
             const int fill_height = static_cast<int>(std::lround(bar_height * covered));
             if (fill_height > 0)
             {
-                RECT fill = options.bar_style == 0
+                RECT fill = vertical_fill
                     ? RECT{ bar.left, bar.bottom - fill_height, bar.right, bar.bottom }
                     : RECT{ bar.left, bar.top, bar.left + static_cast<int>(std::lround(segment_width * covered)), bar.bottom };
                 brush = CreateSolidBrush(filled);
@@ -1333,10 +1320,14 @@ void CCodexUsagePlugin::OnInitialize(ITrafficMonitor* app)
         options.text_style = (std::clamp)(read(L"TextStyle", 0), 0, 1);
         options.show_session = read(L"ShowSession", 1) != 0;
         options.show_weekly = read(L"ShowWeekly", 1) != 0;
+        options.session_bar_mode = (std::clamp)(read(L"SessionBarMode", 0), 0, 1);
         const int saved_weekly_mode = read(L"WeeklyBarMode", -1);
         options.weekly_bar_mode = saved_weekly_mode >= 0
             ? (std::clamp)(saved_weekly_mode, 0, 3)
             : (read(L"Weekly7Cells", 0) != 0 ? 1 : (read(L"Weekly14Cells", 0) != 0 ? 2 : 0));
+        const int legacy_fill_direction = (std::clamp)(read(L"FillDirection", 0), 0, 1);
+        options.session_fill_direction = (std::clamp)(read(L"SessionFillDirection", legacy_fill_direction), 0, 1);
+        options.weekly_fill_direction = (std::clamp)(read(L"WeeklyFillDirection", legacy_fill_direction), 0, 1);
         options.show_cards = read(L"ShowCards", 1) != 0;
         options.show_time_bar = read(L"ShowTimeBar", 1) != 0;
         options.show_expiry_warning = read(L"ShowExpiryWarning", 0) != 0;
@@ -1642,7 +1633,10 @@ namespace
         add(L"TextStyle", options.text_style);
         add(L"ShowSession", options.show_session);
         add(L"ShowWeekly", options.show_weekly);
+        add(L"SessionBarMode", options.session_bar_mode);
         add(L"WeeklyBarMode", options.weekly_bar_mode);
+        add(L"SessionFillDirection", options.session_fill_direction);
+        add(L"WeeklyFillDirection", options.weekly_fill_direction);
         add(L"ShowCards", options.show_cards);
         add(L"ShowTimeBar", options.show_time_bar);
         add(L"ShowExpiryWarning", options.show_expiry_warning);
@@ -1754,9 +1748,18 @@ namespace
                 reinterpret_cast<LPARAM>(chinese ? L"YYYY-MM-DD HH:mm:ss（本地时间）" : L"YYYY-MM-DD HH:mm:ss (local time)"));
             CheckDlgButton(dialog, IDC_SESSION, options.show_session ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(dialog, IDC_WEEKLY, options.show_weekly ? BST_CHECKED : BST_UNCHECKED);
+            combo(IDC_SESSION_BAR_MODE, chinese
+                ? std::initializer_list<const wchar_t*>{L"10 格（默认）", L"5 格"}
+                : std::initializer_list<const wchar_t*>{L"10 cells (default)", L"5 cells"}, options.session_bar_mode);
             combo(IDC_WEEKLY_BAR_MODE, chinese
                 ? std::initializer_list<const wchar_t*>{L"10 格（默认）", L"7 格（每天 1 格）", L"14 格（紧凑）", L"14 格（宽松）"}
                 : std::initializer_list<const wchar_t*>{L"10 cells (default)", L"7 cells (1/day)", L"14 cells (compact)", L"14 cells (spacious)"}, options.weekly_bar_mode);
+            combo(IDC_SESSION_FILL_DIRECTION, chinese
+                ? std::initializer_list<const wchar_t*>{L"纵向", L"横向（从左到右）"}
+                : std::initializer_list<const wchar_t*>{L"Vertical", L"Horizontal (left to right)"}, options.session_fill_direction);
+            combo(IDC_WEEKLY_FILL_DIRECTION, chinese
+                ? std::initializer_list<const wchar_t*>{L"纵向", L"横向（从左到右）"}
+                : std::initializer_list<const wchar_t*>{L"Vertical", L"Horizontal (left to right)"}, options.weekly_fill_direction);
             CheckDlgButton(dialog, IDC_CARDS, options.show_cards ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(dialog, IDC_TIME_BAR, options.show_time_bar ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(dialog, IDC_EXPIRY_WARNING, options.show_expiry_warning ? BST_CHECKED : BST_UNCHECKED);
@@ -1764,6 +1767,10 @@ namespace
             EnableWindow(GetDlgItem(dialog, IDC_EXPIRY_TIME), options.show_time_bar && options.show_expiry_warning);
             EnableWindow(GetDlgItem(dialog, IDC_WEEKLY_BAR_MODE),
                 options.show_weekly && options.bar_style == 0);
+            EnableWindow(GetDlgItem(dialog, IDC_SESSION_BAR_MODE),
+                options.show_session && options.bar_style == 0);
+            EnableWindow(GetDlgItem(dialog, IDC_SESSION_FILL_DIRECTION), options.show_session && options.bar_style == 0);
+            EnableWindow(GetDlgItem(dialog, IDC_WEEKLY_FILL_DIRECTION), options.show_weekly && options.bar_style == 0);
             if (chinese)
             {
                 SetWindowTextW(dialog, L"Codex Usage 插件选项");
@@ -1771,6 +1778,9 @@ namespace
                     {IDC_POLL_LABEL, L"刷新频率"}, {IDC_THEME_LABEL, L"主题"}, {IDC_BAR_LABEL, L"额度进度条"},
                     {IDC_TEXT_LABEL, L"文字样式"}, {IDC_SESSION, L"显示 5 小时额度"}, {IDC_WEEKLY, L"显示 7 天额度"},
                     {IDC_WEEKLY_BAR_LABEL, L"7 天进度条"},
+                    {IDC_SESSION_BAR_LABEL, L"5 小时格数"},
+                    {IDC_SESSION_FILL_DIRECTION_LABEL, L"5 小时填充方向"},
+                    {IDC_WEEKLY_FILL_DIRECTION_LABEL, L"7 天填充方向"},
                     {IDC_CARDS, L"显示重置卡片"}, {IDC_TIME_BAR, L"显示时间进度条"},
                     {IDC_EXPIRY_WARNING, L"启用过期提示"},
                     {IDC_SCHEDULE_LABEL, L"每周休息安排"}, {IDC_MORNING_LABEL, L"上午时段"},
@@ -1807,12 +1817,16 @@ namespace
         }
         if (message == WM_COMMAND)
         {
-            if ((LOWORD(wp) == IDC_WEEKLY && HIWORD(wp) == BN_CLICKED) ||
+            if (((LOWORD(wp) == IDC_WEEKLY || LOWORD(wp) == IDC_SESSION) && HIWORD(wp) == BN_CLICKED) ||
                 (LOWORD(wp) == IDC_BAR && HIWORD(wp) == CBN_SELCHANGE))
             {
                 const bool show_weekly = IsDlgButtonChecked(dialog, IDC_WEEKLY) == BST_CHECKED;
+                const bool show_session = IsDlgButtonChecked(dialog, IDC_SESSION) == BST_CHECKED;
                 const int bar_style = static_cast<int>(SendDlgItemMessageW(dialog, IDC_BAR, CB_GETCURSEL, 0, 0));
                 EnableWindow(GetDlgItem(dialog, IDC_WEEKLY_BAR_MODE), show_weekly && bar_style == 0);
+                EnableWindow(GetDlgItem(dialog, IDC_SESSION_BAR_MODE), show_session && bar_style == 0);
+                EnableWindow(GetDlgItem(dialog, IDC_SESSION_FILL_DIRECTION), show_session && bar_style == 0);
+                EnableWindow(GetDlgItem(dialog, IDC_WEEKLY_FILL_DIRECTION), show_weekly && bar_style == 0);
                 return TRUE;
             }
             if (LOWORD(wp) == IDC_TIME_BAR && HIWORD(wp) == BN_CLICKED)
@@ -1843,8 +1857,14 @@ namespace
                 options.text_style = static_cast<int>(SendDlgItemMessageW(dialog, IDC_TEXT, CB_GETCURSEL, 0, 0));
                 options.show_session = IsDlgButtonChecked(dialog, IDC_SESSION) == BST_CHECKED;
                 options.show_weekly = IsDlgButtonChecked(dialog, IDC_WEEKLY) == BST_CHECKED;
+                options.session_bar_mode = static_cast<int>(SendDlgItemMessageW(dialog, IDC_SESSION_BAR_MODE, CB_GETCURSEL, 0, 0));
+                if (options.session_bar_mode < 0 || options.session_bar_mode > 1) options.session_bar_mode = 0;
                 options.weekly_bar_mode = static_cast<int>(SendDlgItemMessageW(dialog, IDC_WEEKLY_BAR_MODE, CB_GETCURSEL, 0, 0));
                 if (options.weekly_bar_mode < 0 || options.weekly_bar_mode > 3) options.weekly_bar_mode = 0;
+                options.session_fill_direction = static_cast<int>(SendDlgItemMessageW(dialog, IDC_SESSION_FILL_DIRECTION, CB_GETCURSEL, 0, 0));
+                if (options.session_fill_direction < 0 || options.session_fill_direction > 1) options.session_fill_direction = 0;
+                options.weekly_fill_direction = static_cast<int>(SendDlgItemMessageW(dialog, IDC_WEEKLY_FILL_DIRECTION, CB_GETCURSEL, 0, 0));
+                if (options.weekly_fill_direction < 0 || options.weekly_fill_direction > 1) options.weekly_fill_direction = 0;
                 options.show_cards = IsDlgButtonChecked(dialog, IDC_CARDS) == BST_CHECKED;
                 options.show_time_bar = IsDlgButtonChecked(dialog, IDC_TIME_BAR) == BST_CHECKED;
                 options.show_expiry_warning = IsDlgButtonChecked(dialog, IDC_EXPIRY_WARNING) == BST_CHECKED;
@@ -1946,7 +1966,7 @@ int CCodexUsageItem::GetItemWidthEx(void* hDC) const
     const int weekly_gap = options.weekly_bar_mode == 1 ? (std::max)(2, session_gap) :
         (options.weekly_bar_mode == 0 ? session_gap : 1);
     const auto bar_widths = CalculateQuotaBarWidths(sc(89), sc(69), options.weekly_bar_mode,
-        session_gap, weekly_gap, options.bar_style == 0);
+        options.session_bar_mode, session_gap, weekly_gap, options.bar_style == 0);
     const int bar_width = bar_widths.LayoutWidth();
     SIZE short_label{}, long_label{};
     GetTextExtentPoint32W(dc, L"5h", 2, &short_label);

@@ -56,7 +56,7 @@ The plugin currently displays Codex data only. It includes the custom detail pan
 
 ## Display and refresh
 
-The quota display has ten narrow vertical cells per row. Each cell represents 10%; partial quota fills the cell from the bottom. A thin gray line below each row shows its remaining time ratio. Reset cards show expiry days, switching to hours or minutes near expiry.
+In segmented mode, the 5-hour row can use five or ten cells, and the 7-day row keeps its existing 10-, 7-, and 14-cell choices. Each row has its own fill-direction setting: vertical or horizontal (left to right); both default to vertical. A thin gray line below each row shows its remaining time ratio. Reset cards show expiry days, switching to hours or minutes near expiry.
 
 Taskbar text, bars, and reset-card geometry follow the host drawing context's DPI. Reset-card outlines stay one physical pixel wide to remain crisp at high scaling levels; their inset fill uses Qoder's light-theme empty-cell gray, separated from the outline by a one-pixel gap.
 
@@ -76,6 +76,7 @@ The dialog follows the host's Chinese or English language and supports:
 - Quota sampling is fixed at one minute; the refresh control shows this fixed interval.
 - Follow the host theme, or use light/dark quota text and bar colors.
 - Segmented or continuous quota bars; compact or detailed quota text.
+- Choose five or ten cells for the 5-hour bar, keep the existing 7-day cell-count choices, and set the fill direction independently for the 5-hour and 7-day bars.
 - Show the 5-hour and/or 7-day quota (at least one must remain visible).
 - Show reset cards and the time bar independently.
 - Choose two-day, one-day, or alternating A/B weekly rest schedules, and set the five-hour bar's four work-period boundaries.
@@ -93,8 +94,8 @@ the existing sample. Failed requests never create samples from cached values.
 
 The 5h row shows the last rolling hour of consumption, and the 7d row shows the
 last rolling 24 hours. A subtle gray fill extends the remaining-quota fill into
-the empty cells, using the same vertical partial-cell behavior; continuous bars
-use horizontal fill. Light mode uses a slightly darker gray than empty cells;
+the empty cells, using the selected fill direction; continuous bars use horizontal
+fill. Light mode uses a slightly darker gray than empty cells;
 dark mode uses a slightly lighter gray for visibility.
 
 Each successful quota response is a meter reading (time, cumulative percentage,
