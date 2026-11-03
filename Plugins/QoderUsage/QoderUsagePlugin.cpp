@@ -335,6 +335,48 @@ namespace
             static_cast<int>(bytes.size()), body.data(), count) == count;
     }
 
+    // Qoder exposes the exact avatar/benefit attention state in its local Campaign log.
+    // This avoids a campaign GET that omits personalized items without native identity.
+    bool ReadQoderClaimableAttention(bool& claimable)
+    {
+        wchar_t appdata[MAX_PATH]{};
+        const DWORD length = GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH);
+        if (!length || length >= MAX_PATH) return false;
+        const auto logs = std::filesystem::path(appdata) / L"com.qoder.app.stable" / L"logs";
+        FILETIME now{};
+        GetSystemTimeAsFileTime(&now);
+        ULARGE_INTEGER now_value{};
+        now_value.LowPart = now.dwLowDateTime; now_value.HighPart = now.dwHighDateTime;
+        ULARGE_INTEGER best{};
+        bool found = false, latest = false;
+        std::error_code error;
+        for (std::filesystem::directory_iterator it(logs, error), end; !error && it != end; it.increment(error))
+        {
+            const auto file = it->path() / L"main.log";
+            std::ifstream input(file, std::ios::binary);
+            std::string line;
+            while (std::getline(input, line))
+            {
+                const auto marker = line.find("\"hasClaimableCampaign\":");
+                if (marker == std::string::npos || line.size() < 25 || line[0] != '[') continue;
+                unsigned short year{}, month{}, day{}, hour{}, minute{}, second{};
+                if (sscanf_s(line.c_str(), "[%4hu-%2hu-%2huT%2hu:%2hu:%2hu", &year, &month, &day, &hour, &minute, &second) != 6) continue;
+                SYSTEMTIME stamp{ year, month, 0, day, hour, minute, second, 0 };
+                FILETIME ft{}; if (!SystemTimeToFileTime(&stamp, &ft)) continue;
+                ULARGE_INTEGER value{}; value.LowPart = ft.dwLowDateTime; value.HighPart = ft.dwHighDateTime;
+                if (value.QuadPart > now_value.QuadPart || now_value.QuadPart - value.QuadPart > 90ULL * 60 * 10000000) continue;
+                const auto value_pos = marker + 23;
+                if (line.compare(value_pos, 4, "true") != 0 && line.compare(value_pos, 5, "false") != 0) continue;
+                if (!found || value.QuadPart > best.QuadPart)
+                {
+                    found = true; best = value; latest = line.compare(value_pos, 4, "true") == 0;
+                }
+            }
+        }
+        if (found) claimable = latest;
+        return found;
+    }
+
     // ---------- snapshot ----------
 
     void RefreshSnapshotWorker(QuotaProvider provider)
@@ -404,31 +446,10 @@ namespace
             else
                 snapshot.status = cn ? L"账号未返回额度数据" : L"No quota data returned";
         }
-        // The campaign list is read-only. A missing or malformed list remains unknown.
-        std::wstring campaign_body;
-        if (provider == QuotaProvider::Qoder && HttpGet(region.base, credential.token, L"/sash/api/v1/me/campaigns?forceRefresh=true", campaign_body, true))
+        if (provider == QuotaProvider::Qoder)
         {
-            JsonValue campaign_root;
-            if (ParseJson(campaign_body, campaign_root))
-            {
-                const JsonValue* data = campaign_root.Get(L"data");
-                if (!data || data->type != JsonValue::Type::Object) data = &campaign_root;
-                const JsonValue* campaigns = data->Get(L"campaigns");
-                if (campaigns && campaigns->type == JsonValue::Type::Array)
-                {
-                    snapshot.checkin_known = true;
-                    for (const auto& campaign : campaigns->array)
-                    {
-                        const auto action = campaign.Get(L"actionType");
-                        const auto status = campaign.Get(L"claimStatus");
-                        if (action && status && action->String() == L"CLAIM_BENEFIT" && status->String() == L"CLAIMABLE")
-                        {
-                            snapshot.checkin_active = true;
-                            break;
-                        }
-                    }
-                }
-            }
+            snapshot.checkin_known = ReadQoderClaimableAttention(snapshot.checkin_active);
+            snapshot.checkin_done = false;
         }
         SecureZeroMemory(credential.token.data(), credential.token.size() * sizeof(wchar_t));
         plugin.PublishSnapshot(snapshot, provider);
